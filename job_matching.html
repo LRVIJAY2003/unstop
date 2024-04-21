@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Enhanced Job Matching</title>
+</head>
+<body>
+    <h1>Enhanced Job Matching</h1>
+    <label for="qualifications">Enter Your Qualifications:</label>
+    <input type="text" id="qualifications" placeholder="Enter your qualifications">
+    <button onclick="matchJob()">Match Job</button>
+    <p id="matched-job"></p>
+
+    <script>
+        function matchJob() {
+            const qualifications = document.getElementById('qualifications').value;
+            
+            const matchedJob = findMatchedJob(qualifications);
+ 
+            const matchedJobElement = document.getElementById('matched-job');
+            if (matchedJob) {
+                matchedJobElement.textContent = `Matched Job: ${matchedJob}`;
+            } else {
+                matchedJobElement.textContent = 'No job matches found for the given qualifications.';
+            }
+        }
+
+        function findMatchedJob(qualifications) {
+            const jobDatabase = [
+                { title: 'Software Engineer', requirements: 'Degree in Computer Science, Proficiency in Java and Python' },
+                { title: 'Data Analyst', requirements: 'Strong analytical skills, Experience with SQL and Excel' },
+                { title: 'Marketing Manager', requirements: 'Bachelor’s degree in Marketing, Excellent communication skills' }
+            ];
+            
+            for (const job of jobDatabase) {
+                if (qualifications.toLowerCase().includes(job.requirements.toLowerCase())) {
+                    return job.title;
+                }
+            }
+            
+            return null;
+        }
+    </script>
+</body>
+</html>

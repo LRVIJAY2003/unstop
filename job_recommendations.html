@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Personalized Job Recommendations</title>
+    <style>
+
+        ul {
+            list-style-type: none;
+            padding: 0;
+        }
+        li {
+            margin-bottom: 10px;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Personalized Job Recommendations</h1>
+
+    <label for="filter">Filter by keyword:</label>
+    <input type="text" id="filter" name="filter">
+    <button onclick="filterRecommendations()">Filter</button>
+
+    <ul id="recommendations-list">
+        {% for recommendation in recommendations %}
+        <li>{{ recommendation }}</li>
+        {% endfor %}
+    </ul>
+
+    <button onclick="refreshRecommendations()">Refresh Recommendations</button>
+
+    <script>
+        
+        function filterRecommendations() {
+            const filterInput = document.getElementById('filter').value.toLowerCase();
+            const recommendationsList = document.getElementById('recommendations-list');
+            const recommendations = recommendationsList.getElementsByTagName('li');
+            
+            for (let i = 0; i < recommendations.length; i++) {
+                const recommendation = recommendations[i].textContent.toLowerCase();
+                if (recommendation.includes(filterInput)) {
+                    recommendations[i].style.display = '';
+                } else {
+                    recommendations[i].style.display = 'none';
+                }
+            }
+        }
+
+        
+        function refreshRecommendations() {
+            
+            const newRecommendations = ['Recommendation 1', 'Recommendation 2', 'Recommendation 3'];
+
+            
+            const recommendationsList = document.getElementById('recommendations-list');
+            recommendationsList.innerHTML = '';
+
+            
+            newRecommendations.forEach(recommendation => {
+                const listItem = document.createElement('li');
+                listItem.textContent = recommendation;
+                recommendationsList.appendChild(listItem);
+            });
+        }
+    </script>
+</body>
+</html>

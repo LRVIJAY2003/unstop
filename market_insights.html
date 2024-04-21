@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Real-time Market Insights</title>
+</head>
+<body>
+    <h1>Real-time Market Insights</h1>
+    <div id="insights-container">
+        <ul id="insights-list">
+            {% for key, value in insights.items() %}
+            <li><strong>{{ key }}:</strong> {{ value }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+    <button onclick="refreshInsights()">Refresh Insights</button>
+    <label for="insight-type">Select Insight Type:</label>
+    <select id="insight-type" onchange="filterInsights(this.value)">
+        <option value="all">All</option>
+        <option value="job_trends">Job Trends</option>
+        <option value="salary_data">Salary Data</option>
+        <option value="industry_reports">Industry Reports</option>
+    </select>
+
+    <script>
+        function refreshInsights() {
+            
+            const newInsights = {
+                'Job Trends': 'Insight 1',
+                'Salary Data': 'Insight 2',
+                'Industry Reports': 'Insight 3'
+            };
+            updateInsights(newInsights);
+        }
+
+        function filterInsights(type) {
+  
+            let filteredInsights;
+            if (type === 'all') {
+                filteredInsights = {
+                    'Job Trends': 'Insight 1',
+                    'Salary Data': 'Insight 2',
+                    'Industry Reports': 'Insight 3'
+                };
+            } else {
+                filteredInsights = { [type]: 'Filtered Insight' };
+            }
+            updateInsights(filteredInsights);
+        }
+
+        function updateInsights(insights) {
+            const insightsList = document.getElementById('insights-list');
+            insightsList.innerHTML = '';
+            for (const key in insights) {
+                if (insights.hasOwnProperty(key)) {
+                    const listItem = document.createElement('li');
+                    listItem.innerHTML = `<strong>${key}:</strong> ${insights[key]}`;
+                    insightsList.appendChild(listItem);
+                }
+            }
+        }
+    </script>
+</body>
+</html>

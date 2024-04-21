@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mock Interview Simulator</title>
+</head>
+<body>
+    <h1>Mock Interview Simulator</h1>
+    <div id="interview-feedback"></div>
+    <div id="interview-questions">
+        <h2>Interview Questions</h2>
+        <ul id="question-list">
+
+        </ul>
+    </div>
+    <div id="user-responses">
+        <h2>Your Responses</h2>
+        <ul id="response-list">
+
+        </ul>
+    </div>
+    <button onclick="startInterview()">Start Interview</button>
+    <div id="timer"></div>
+
+    <script>
+        let questions = ['Question 1', 'Question 2', 'Question 3'];
+        let interviewIndex = 0;
+        let startTime;
+
+        function startInterview() {
+
+            document.getElementById('interview-feedback').innerHTML = '';
+            document.getElementById('response-list').innerHTML = '';
+
+            startTime = new Date().getTime();
+            updateTimer();
+
+            displayNextQuestion();
+        }
+
+        function displayNextQuestion() {
+            if (interviewIndex < questions.length) {
+                const question = questions[interviewIndex];
+                const questionList = document.getElementById('question-list');
+                const listItem = document.createElement('li');
+                listItem.textContent = question;
+                questionList.appendChild(listItem);
+                interviewIndex++;
+            } else {
+                document.getElementById('interview-feedback').textContent = 'Interview completed. Thank you!';
+            }
+        }
+
+        function updateTimer() {
+            const currentTime = new Date().getTime();
+            const elapsedTime = currentTime - startTime;
+            const seconds = Math.floor(elapsedTime / 1000);
+            const minutes = Math.floor(seconds / 60);
+            const remainingSeconds = seconds % 60;
+            document.getElementById('timer').textContent = `Time Elapsed: ${minutes}m ${remainingSeconds}s`;
+            setTimeout(updateTimer, 1000);
+        }
+
+        function submitResponse() {
+            const response = document.getElementById('response').value;
+            const responseList = document.getElementById('response-list');
+            const listItem = document.createElement('li');
+            listItem.textContent = response;
+            responseList.appendChild(listItem);
+
+            const feedback = analyzeResponse(response);
+            document.getElementById('interview-feedback').textContent = feedback;
+
+            document.getElementById('response').value = '';
+
+            displayNextQuestion();
+        }
+
+        function analyzeResponse(response) {
+
+            return 'Feedback for the user response';
+        }
+    </script>
+</body>
+</html>

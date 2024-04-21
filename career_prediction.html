@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Career Path Prediction</title>
+</head>
+<body>
+    <h1>Career Path Prediction</h1>
+    <form id="career-prediction-form">
+        <label for="skills">Enter Your Skills:</label><br>
+        <input type="text" id="skills" name="skills"><br>
+        <label for="experiences">Enter Your Experiences:</label><br>
+        <input type="text" id="experiences" name="experiences"><br><br>
+        <button type="submit">Predict Career Path</button>
+    </form>
+    <p id="predicted-career-path"></p>
+
+    <script>
+        document.getElementById('career-prediction-form').addEventListener('submit', function(event) {
+            event.preventDefault(); 
+          
+            const skills = document.getElementById('skills').value;
+            const experiences = document.getElementById('experiences').value;
+
+            const predictedCareerPath = predictCareerPath(skills, experiences);
+
+            const predictedCareerPathElement = document.getElementById('predicted-career-path');
+            predictedCareerPathElement.textContent = `Predicted Career Path: ${predictedCareerPath}`;
+        });
+
+        function predictCareerPath(skills, experiences) {
+
+            return "Software Engineer";
+        }
+    </script>
+</body>
+</html>
