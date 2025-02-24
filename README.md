@@ -1,5 +1,10 @@
 # unstop
 includes algorithms that will be scaled as per the requirements
+pip install numpy pandas nltk spacy scikit-learn reportlab python-docx PyPDF2 google-cloud-aiplatform
+pip install google-generativeai
+python -m spacy download en_core_web_sm
+gcloud auth application-default login
+pip install vertexai
 import os
 import re
 import glob
