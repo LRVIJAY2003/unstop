@@ -1143,3 +1143,669 @@ def process_query_and_generate_pdf(rag_system, query):
 
 if __name__ == "__main__":
     main()
+
+
+import os
+import re
+import glob
+import numpy as np
+import pandas as pd
+from typing import List, Dict, Any, Tuple, Optional, Union
+from pathlib import Path
+import tempfile
+import docx
+import PyPDF2
+import nltk
+import spacy
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+from datetime import datetime
+import heapq
+from collections import Counter
+
+# Download NLTK resources
+nltk.download('punkt', quiet=True)
+nltk.download('stopwords', quiet=True)
+nltk.download('wordnet', quiet=True)
+
+# Load spaCy model
+try:
+    nlp = spacy.load("en_core_web_sm")
+except:
+    # If model not installed, download it
+    os.system("python -m spacy download en_core_web_sm")
+    nlp = spacy.load("en_core_web_sm")
+
+class DocumentProcessor:
+    """Handles document processing, text extraction, and embedding generation."""
+    
+    def __init__(self, knowledge_base_path: str):
+        """
+        Initialize the document processor.
+        
+        Args:
+            knowledge_base_path: Path to the folder containing knowledge base documents
+        """
+        self.knowledge_base_path = knowledge_base_path
+        self.documents = {}  # Will store document content
+        self.doc_embeddings = {}  # Will store document embeddings
+        self.vectorizer = TfidfVectorizer(stop_words='english')
+        
+    def load_all_documents(self) -> Dict[str, str]:
+        """
+        Load all documents from the knowledge base.
+        
+        Returns:
+            Dictionary mapping document names to their content
+        """
+        all_files = glob.glob(os.path.join(self.knowledge_base_path, '*.*'))
+        
+        for file_path in all_files:
+            try:
+                file_name = os.path.basename(file_path)
+                file_extension = os.path.splitext(file_path)[1].lower()
+                
+                if file_extension == '.txt':
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        self.documents[file_name] = f.read()
+                        
+                elif file_extension == '.docx':
+                    doc = docx.Document(file_path)
+                    content = '\n'.join([paragraph.text for paragraph in doc.paragraphs])
+                    self.documents[file_name] = content
+                    
+                elif file_extension == '.pdf':
+                    with open(file_path, 'rb') as f:
+                        pdf_reader = PyPDF2.PdfReader(f)
+                        content = ''
+                        for page_num in range(len(pdf_reader.pages)):
+                            content += pdf_reader.pages[page_num].extract_text()
+                        self.documents[file_name] = content
+                
+                else:
+                    print(f"Unsupported file type: {file_extension} for file {file_name}")
+                    
+            except Exception as e:
+                print(f"Error processing file {file_path}: {str(e)}")
+                
+        print(f"Loaded {len(self.documents)} documents from knowledge base")
+        return self.documents
+    
+    def create_document_embeddings(self):
+        """Create TF-IDF embeddings for all documents."""
+        if not self.documents:
+            self.load_all_documents()
+            
+        docs_content = list(self.documents.values())
+        doc_names = list(self.documents.keys())
+        
+        # Fit and transform to get document embeddings
+        tfidf_matrix = self.vectorizer.fit_transform(docs_content)
+        
+        # Store embeddings with their document names
+        for i, doc_name in enumerate(doc_names):
+            self.doc_embeddings[doc_name] = tfidf_matrix[i]
+    
+    def preprocess_text(self, text: str) -> str:
+        """
+        Preprocess text for better matching.
+        
+        Args:
+            text: Text to preprocess
+            
+        Returns:
+            Preprocessed text
+        """
+        # Convert to lowercase
+        text = text.lower()
+        
+        # Process with spaCy for better tokenization and lemmatization
+        doc = nlp(text)
+        
+        # Get lemmatized tokens, excluding stopwords and punctuation
+        tokens = [token.lemma_ for token in doc if not token.is_stop and not token.is_punct]
+        
+        return ' '.join(tokens)
+    
+    def search_documents(self, query: str, top_k: int = 3) -> List[Tuple[str, float, str]]:
+        """
+        Search for documents relevant to the query.
+        
+        Args:
+            query: User query
+            top_k: Number of top results to return
+            
+        Returns:
+            List of tuples (doc_name, similarity_score, content)
+        """
+        if not self.doc_embeddings:
+            self.create_document_embeddings()
+        
+        # Preprocess the query
+        processed_query = self.preprocess_text(query)
+        
+        # Transform query using the same vectorizer
+        query_vector = self.vectorizer.transform([processed_query])
+        
+        results = []
+        
+        # Calculate similarity between query and all documents
+        for doc_name, doc_vector in self.doc_embeddings.items():
+            similarity = cosine_similarity(query_vector, doc_vector)[0][0]
+            results.append((doc_name, similarity, self.documents[doc_name]))
+            
+        # Sort by similarity (highest first) and return top_k results
+        results.sort(key=lambda x: x[1], reverse=True)
+        return results[:top_k]
+
+    def exact_keyword_search(self, keyword: str) -> List[Tuple[str, str]]:
+        """
+        Search for exact keyword matches in documents.
+        
+        Args:
+            keyword: Keyword to search for
+            
+        Returns:
+            List of tuples (doc_name, relevant_context)
+        """
+        if not self.documents:
+            self.load_all_documents()
+            
+        results = []
+        keyword_lower = keyword.lower()
+        
+        for doc_name, content in self.documents.items():
+            # Check if keyword exists in the document
+            if keyword_lower in content.lower():
+                # Extract context around the keyword
+                relevant_context = self.extract_context(content, keyword_lower)
+                if relevant_context:
+                    results.append((doc_name, relevant_context))
+                    
+        return results
+    
+    def extract_context(self, text: str, keyword: str, context_size: int = 500) -> str:
+        """
+        Extract context around a keyword in text.
+        
+        Args:
+            text: Full text to extract from
+            keyword: Keyword to find
+            context_size: Number of characters to extract around the keyword
+            
+        Returns:
+            Text with context around keyword
+        """
+        text_lower = text.lower()
+        keyword_lower = keyword.lower()
+        
+        # Find all occurrences of the keyword
+        matches = [match.start() for match in re.finditer(keyword_lower, text_lower)]
+        
+        if not matches:
+            return ""
+            
+        # Extract context around first occurrence
+        start_pos = max(0, matches[0] - context_size)
+        end_pos = min(len(text), matches[0] + len(keyword) + context_size)
+        
+        # Find sentence boundaries if possible
+        if start_pos > 0:
+            # Try to start at the beginning of a sentence
+            sentence_start = text.rfind('.', 0, start_pos)
+            if sentence_start != -1:
+                start_pos = sentence_start + 1
+        
+        if end_pos < len(text):
+            # Try to end at the end of a sentence
+            sentence_end = text.find('.', end_pos)
+            if sentence_end != -1:
+                end_pos = sentence_end + 1
+        
+        return text[start_pos:end_pos].strip()
+
+
+class RAGSystem:
+    """Implements the Retrieval-Augmented Generation system without external APIs."""
+    
+    def __init__(self, knowledge_base_path: str):
+        """
+        Initialize the RAG system.
+        
+        Args:
+            knowledge_base_path: Path to the folder containing knowledge base documents
+        """
+        self.document_processor = DocumentProcessor(knowledge_base_path)
+    
+    def process_query(self, query: str) -> Dict[str, Any]:
+        """
+        Process a user query and generate a response.
+        
+        Args:
+            query: User query text
+            
+        Returns:
+            Dictionary with response information
+        """
+        print(f"Processing query: {query}")
+        
+        # Load documents if not already loaded
+        if not self.document_processor.documents:
+            self.document_processor.load_all_documents()
+        
+        # Check if query is a simple keyword or a complete question
+        is_question = self._is_question(query)
+        print(f"Query identified as {'question' if is_question else 'keyword search'}")
+        
+        retrieved_docs = []
+        
+        if is_question:
+            # For questions, use semantic search to find relevant documents
+            results = self.document_processor.search_documents(query)
+            retrieved_docs = [(doc_name, content) for doc_name, score, content in results if score > 0.1]
+        else:
+            # For keywords, use exact matching first
+            retrieved_docs = self.document_processor.exact_keyword_search(query)
+            
+            # If no exact matches, fall back to semantic search
+            if not retrieved_docs:
+                print("No exact matches found, falling back to semantic search")
+                results = self.document_processor.search_documents(query)
+                retrieved_docs = [(doc_name, content) for doc_name, score, content in results if score > 0.1]
+        
+        print(f"Found {len(retrieved_docs)} relevant documents")
+        
+        if not retrieved_docs:
+            # No relevant documents found
+            return {
+                "success": False,
+                "error": "No relevant information found for your query.",
+                "query": query,
+                "retrieved_docs": []
+            }
+        
+        # Generate response using extractive summarization
+        response = self._generate_summary(query, retrieved_docs)
+        
+        return {
+            "success": True,
+            "query": query,
+            "response": response,
+            "retrieved_docs": [doc_name for doc_name, _ in retrieved_docs]
+        }
+    
+    def _is_question(self, text: str) -> bool:
+        """
+        Determine if text is a question.
+        
+        Args:
+            text: Text to analyze
+            
+        Returns:
+            True if text appears to be a question
+        """
+        # Check for question marks
+        if '?' in text:
+            return True
+            
+        # Check for question words
+        question_starters = ['what', 'who', 'where', 'when', 'why', 'how', 'can', 'could', 'would', 'should', 'is', 'are', 'do', 'does', 'tell', 'explain', 'describe']
+        first_word = text.lower().split()[0] if text else ""
+        
+        return first_word in question_starters
+    
+    def _generate_summary(self, query: str, retrieved_docs: List[Tuple[str, str]]) -> str:
+        """
+        Generate a summary response using extractive summarization.
+        
+        Args:
+            query: User query
+            retrieved_docs: List of (doc_name, content) tuples
+            
+        Returns:
+            Generated summary
+        """
+        # First, try to extract sentences that are most relevant to the query
+        query_sentences = self._extract_query_relevant_sentences(query, retrieved_docs)
+        
+        # Also extract key sentences from the documents
+        key_sentences = self._extract_key_sentences(retrieved_docs)
+        
+        # Combine the sentences, prioritizing query-relevant ones
+        all_summary_sentences = query_sentences + [s for s in key_sentences if s not in query_sentences]
+        
+        # Limit to a reasonable number of sentences
+        summary_sentences = all_summary_sentences[:10]
+        
+        # Format the response
+        if summary_sentences:
+            summary = " ".join(summary_sentences)
+            
+            # Add an introduction
+            intro = f"Based on the information in the documents, here's what I found about '{query}':\n\n"
+            
+            # Add document sources
+            sources = "\n\nInformation sourced from: " + ", ".join([doc_name for doc_name, _ in retrieved_docs])
+            
+            return intro + summary + sources
+        else:
+            # Fallback if no good sentences were found
+            return self._generate_simple_summary(retrieved_docs)
+    
+    def _extract_query_relevant_sentences(self, query: str, retrieved_docs: List[Tuple[str, str]]) -> List[str]:
+        """
+        Extract sentences that are most relevant to the query.
+        
+        Args:
+            query: User query
+            retrieved_docs: List of (doc_name, content) tuples
+            
+        Returns:
+            List of relevant sentences
+        """
+        # Preprocess the query
+        processed_query = self.document_processor.preprocess_text(query)
+        query_terms = processed_query.split()
+        
+        if not query_terms:
+            return []
+        
+        # Extract sentences from all documents
+        all_sentences = []
+        for _, content in retrieved_docs:
+            sentences = nltk.sent_tokenize(content)
+            all_sentences.extend(sentences)
+        
+        # Score sentences based on query term matches
+        sentence_scores = []
+        for sentence in all_sentences:
+            # Clean and tokenize sentence
+            clean_sentence = self.document_processor.preprocess_text(sentence)
+            sentence_terms = clean_sentence.split()
+            
+            # Count matching terms
+            matches = sum(1 for term in query_terms if term in sentence_terms)
+            if matches > 0:
+                # Score is the percentage of query terms that match
+                score = matches / len(query_terms)
+                sentence_scores.append((sentence, score))
+        
+        # Sort by score (highest first)
+        sentence_scores.sort(key=lambda x: x[1], reverse=True)
+        
+        # Take top sentences
+        return [sentence for sentence, score in sentence_scores[:5] if score > 0.2]
+    
+    def _extract_key_sentences(self, retrieved_docs: List[Tuple[str, str]]) -> List[str]:
+        """
+        Extract key sentences from documents using TextRank-like algorithm.
+        
+        Args:
+            retrieved_docs: List of (doc_name, content) tuples
+            
+        Returns:
+            List of key sentences
+        """
+        # Extract all sentences
+        all_sentences = []
+        for _, content in retrieved_docs:
+            sentences = nltk.sent_tokenize(content)
+            all_sentences.extend([s for s in sentences if len(s.split()) > 5])  # Filter very short sentences
+        
+        if not all_sentences:
+            return []
+        
+        # Create sentence vectors
+        sentence_vectors = {}
+        for sentence in all_sentences:
+            clean_sentence = self.document_processor.preprocess_text(sentence)
+            words = clean_sentence.split()
+            sentence_vectors[sentence] = Counter(words)
+        
+        # Calculate similarity between sentences
+        sentence_scores = {}
+        for sentence in all_sentences:
+            sentence_scores[sentence] = 0
+            for other_sentence in all_sentences:
+                if sentence != other_sentence:
+                    # Simple intersection of word sets as similarity measure
+                    common_words = set(sentence_vectors[sentence].keys()) & set(sentence_vectors[other_sentence].keys())
+                    similarity = len(common_words) / (len(sentence_vectors[sentence]) + len(sentence_vectors[other_sentence]) + 1e-10)
+                    sentence_scores[sentence] += similarity
+        
+        # Get top sentences
+        top_sentences = heapq.nlargest(5, sentence_scores.items(), key=lambda x: x[1])
+        
+        # Sort sentences by their original order
+        ordered_sentences = [s[0] for s in top_sentences]
+        ordered_sentences.sort(key=lambda s: all_sentences.index(s))
+        
+        return ordered_sentences
+    
+    def _generate_simple_summary(self, retrieved_docs: List[Tuple[str, str]]) -> str:
+        """
+        Generate a simple summary from the documents.
+        
+        Args:
+            retrieved_docs: List of (doc_name, content) tuples
+            
+        Returns:
+            Simple summary text
+        """
+        summary = "Here's information found in the documents:\n\n"
+        
+        for doc_name, content in retrieved_docs:
+            # Extract first few sentences from each document
+            sentences = nltk.sent_tokenize(content)
+            doc_summary = " ".join(sentences[:3])  # First 3 sentences
+            
+            summary += f"From {doc_name}:\n{doc_summary}\n\n"
+            
+        return summary
+    
+    def generate_pdf_report(self, query: str, response: str, retrieved_docs: List[str]) -> str:
+        """
+        Generate a PDF report of the response.
+        
+        Args:
+            query: User query
+            response: Generated response
+            retrieved_docs: List of document names used
+            
+        Returns:
+            Path to the generated PDF
+        """
+        # Create a temporary directory for the PDF
+        with tempfile.TemporaryDirectory() as temp_dir:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_path = os.path.join(temp_dir, f"response_{timestamp}.pdf")
+            
+            # Create the PDF
+            c = canvas.Canvas(output_path, pagesize=letter)
+            width, height = letter
+            
+            # Add title
+            c.setFont("Helvetica-Bold", 16)
+            c.drawString(72, height - 72, "Query Response Summary")
+            
+            # Add query
+            c.setFont("Helvetica-Bold", 12)
+            c.drawString(72, height - 100, "User Query:")
+            c.setFont("Helvetica", 12)
+            
+            # Handle long queries by wrapping text
+            text_object = c.beginText(72, height - 120)
+            text_object.setFont("Helvetica", 12)
+            
+            wrapped_query = self._wrap_text(query, 80)
+            for line in wrapped_query:
+                text_object.textLine(line)
+            
+            c.drawText(text_object)
+            
+            # Add response with wrapped text
+            y_position = height - 120 - (len(wrapped_query) * 15) - 30
+            c.setFont("Helvetica-Bold", 12)
+            c.drawString(72, y_position, "Response:")
+            
+            text_object = c.beginText(72, y_position - 20)
+            text_object.setFont("Helvetica", 12)
+            
+            wrapped_response = self._wrap_text(response, 80)
+            for line in wrapped_response:
+                text_object.textLine(line)
+            
+            c.drawText(text_object)
+            
+            # Add sources
+            y_position = y_position - 20 - (len(wrapped_response) * 15) - 30
+            
+            if y_position < 72:  # If we're running out of space, add a new page
+                c.showPage()
+                y_position = height - 72
+            
+            c.setFont("Helvetica-Bold", 12)
+            c.drawString(72, y_position, "Sources:")
+            
+            text_object = c.beginText(72, y_position - 20)
+            text_object.setFont("Helvetica", 10)
+            
+            for doc in retrieved_docs:
+                text_object.textLine(f"- {doc}")
+            
+            c.drawText(text_object)
+            
+            # Add timestamp
+            c.setFont("Helvetica", 10)
+            c.drawString(72, 72, f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            
+            c.save()
+            
+            # In Vertex AI Workbench notebook environment
+            final_path = f"/home/jupyter/response_{timestamp}.pdf"
+            os.system(f"cp {output_path} {final_path}")
+            
+            return final_path
+    
+    def _wrap_text(self, text: str, width: int) -> List[str]:
+        """
+        Wrap text to fit within specified width.
+        
+        Args:
+            text: Text to wrap
+            width: Maximum line width in characters
+            
+        Returns:
+            List of wrapped lines
+        """
+        lines = []
+        for paragraph in text.split('\n'):
+            if len(paragraph) <= width:
+                lines.append(paragraph)
+            else:
+                words = paragraph.split()
+                current_line = []
+                current_length = 0
+                
+                for word in words:
+                    if current_length + len(word) + len(current_line) <= width:
+                        current_line.append(word)
+                        current_length += len(word)
+                    else:
+                        lines.append(' '.join(current_line))
+                        current_line = [word]
+                        current_length = len(word)
+                
+                if current_line:
+                    lines.append(' '.join(current_line))
+        
+        return lines
+
+
+# Main function to run the RAG system directly
+def main():
+    """Main function to run the RAG system."""
+    
+    # Configuration parameters - using your specified values
+    KNOWLEDGE_BASE_PATH = "knowledge_base_docs"
+    
+    print(f"Initializing RAG system with:")
+    print(f"- Knowledge base path: {KNOWLEDGE_BASE_PATH}")
+    
+    # Initialize the RAG system
+    rag_system = RAGSystem(KNOWLEDGE_BASE_PATH)
+    
+    # Example usage
+    while True:
+        query = input("\nEnter your query (or 'exit' to quit): ")
+        
+        if query.lower() == 'exit':
+            break
+            
+        print("\nProcessing your query...\n")
+        
+        # Process the query
+        result = rag_system.process_query(query)
+        
+        if result["success"]:
+            print("=" * 80)
+            print("RESPONSE:")
+            print("-" * 80)
+            print(result["response"])
+            print("=" * 80)
+            print("\nSources:", ", ".join(result["retrieved_docs"]))
+            
+            # Generate PDF report
+            try:
+                pdf_path = rag_system.generate_pdf_report(
+                    query, 
+                    result["response"], 
+                    result["retrieved_docs"]
+                )
+                print(f"\nPDF report generated at: {pdf_path}")
+            except Exception as e:
+                print(f"\nError generating PDF report: {str(e)}")
+        else:
+            print(f"Error: {result['error']}")
+
+
+# For use in a Jupyter notebook
+def create_rag_system():
+    """Create and return a RAG system instance for use in a notebook."""
+    KNOWLEDGE_BASE_PATH = "knowledge_base_docs"
+    return RAGSystem(KNOWLEDGE_BASE_PATH)
+
+
+def process_query_and_generate_pdf(rag_system, query):
+    """Process a query and generate a PDF report."""
+    result = rag_system.process_query(query)
+    
+    if result["success"]:
+        print("=" * 80)
+        print("RESPONSE:")
+        print("-" * 80)
+        print(result["response"])
+        print("=" * 80)
+        print("\nSources:", ", ".join(result["retrieved_docs"]))
+        
+        # Generate PDF report
+        try:
+            pdf_path = rag_system.generate_pdf_report(
+                query, 
+                result["response"], 
+                result["retrieved_docs"]
+            )
+            print(f"\nPDF report generated at: {pdf_path}")
+            return result["response"], pdf_path
+        except Exception as e:
+            print(f"\nError generating PDF report: {str(e)}")
+            return result["response"], None
+    else:
+        print(f"Error: {result['error']}")
+        return None, None
+
+
+if __name__ == "__main__":
+    main()
