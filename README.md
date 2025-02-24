@@ -1,283 +1,523 @@
 # unstop
 includes algorithms that will be scaled as per the requirements
 import os
-import json
-from datetime import datetime
-import vertexai
-from vertexai.generative_models import GenerativeModel
+import re
+import glob
+import numpy as np
+import pandas as pd
+from typing import List, Dict, Any, Tuple, Optional, Union
+from pathlib import Path
+import tempfile
+import docx
 import PyPDF2
-from bs4 import BeautifulSoup
 import nltk
-from nltk.corpus import stopwords
-import ipywidgets as widgets
-from IPython.display import display
+import spacy
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+from datetime import datetime
+import google.generativeai as genai
+from google.cloud import aiplatform
+from vertexai.generative_models import GenerativeModel
+from vertexai.preview.generative_models import GenerativeModel as PreviewGenerativeModel
+
+# Download NLTK resources
+nltk.download('punkt')
+nltk.download('stopwords')
+nltk.download('wordnet')
+
+# Load spaCy model
+try:
+    nlp = spacy.load("en_core_web_sm")
+except:
+    # If model not installed, download it
+    os.system("python -m spacy download en_core_web_sm")
+    nlp = spacy.load("en_core_web_sm")
 
 class DocumentProcessor:
-    """Handles document processing for various file formats"""
-    def __init__(self):
-        self._supported_formats = {'.txt': self.process_text, 
-                                 '.pdf': self.process_pdf,
-                                 '.docx': self.process_docx,
-                                 '.md': self.process_markdown,
-                                 '.html': self.process_html}
-
-    def process_document(self, file_path):
-        file_ext = os.path.splitext(file_path)[1].lower()
-        if file_ext not in self._supported_formats:
-            raise ValueError(f"Unsupported file format: {file_ext}")
+    """Handles document processing, text extraction, and embedding generation."""
+    
+    def __init__(self, knowledge_base_path: str):
+        """
+        Initialize the document processor.
         
-        content = self._supported_formats[file_ext](file_path)
-        sections = self._split_into_sections(content)
+        Args:
+            knowledge_base_path: Path to the folder containing knowledge base documents
+        """
+        self.knowledge_base_path = knowledge_base_path
+        self.documents = {}  # Will store document content
+        self.doc_embeddings = {}  # Will store document embeddings
+        self.vectorizer = TfidfVectorizer(stop_words='english')
         
-        return {
-            'content': content,
-            'sections': sections,
-            'keywords': self._extract_keywords(content)
-        }
-
-    def process_pdf(self, file_path):
-        text = ""
-        with open(file_path, 'rb') as file:
-            pdf_reader = PyPDF2.PdfReader(file)
-            for page in pdf_reader.pages:
-                text += page.extract_text() + "\n"
-        return self._clean_text(text)
-
-    def process_text(self, file_path):
-        with open(file_path, 'r', encoding='utf-8') as file:
-            return self._clean_text(file.read())
-
-    def process_docx(self, file_path):
-        doc = Document(file_path)
-        return self._clean_text('\n'.join([paragraph.text for paragraph in doc.paragraphs]))
-
-    def process_markdown(self, file_path):
-        with open(file_path, 'r', encoding='utf-8') as file:
-            md_content = file.read()
-            return self._clean_text(BeautifulSoup(md_content, 'html.parser').get_text())
-
-    def process_html(self, file_path):
-        with open(file_path, 'r', encoding='utf-8') as file:
-            soup = BeautifulSoup(file.read(), 'html.parser')
-            return self._clean_text(soup.get_text())
-
-    def _clean_text(self, text):
-        text = re.sub(r'\s+', ' ', text)
-        text = re.sub(r'[^\w\s]', ' ', text)
-        return text.strip()
-
-    def _split_into_sections(self, text):
-        sentences = text.split('.')
-        sections = []
-        current_section = []
+    def load_all_documents(self) -> Dict[str, str]:
+        """
+        Load all documents from the knowledge base.
         
-        for sentence in sentences:
-            current_section.append(sentence)
-            if len(' '.join(current_section)) >= 1000:
-                sections.append({
-                    'content': '. '.join(current_section)
-                })
-                current_section = []
+        Returns:
+            Dictionary mapping document names to their content
+        """
+        all_files = glob.glob(os.path.join(self.knowledge_base_path, '*.*'))
         
-        if current_section:
-            sections.append({
-                'content': '. '.join(current_section)
-            })
-            
-        return sections
-
-    def _extract_keywords(self, text):
-        words = text.lower().split()
-        stop_words = set(stopwords.words('english'))
-        return list(set(word for word in words if word not in stop_words and len(word) > 3))
-
-class KnowledgeBaseInterface:
-    def __init__(self, project_id='cloud-workspace-poc-51731', location='us-central1'):
-        self.project_id = project_id
-        self.location = location
-        vertexai.init(project=project_id, location=location)
-        self.model = GenerativeModel("gemini-1.5-pro-001")
-        self.knowledge_base = {}
-        self.doc_processor = DocumentProcessor()
-        self.load_knowledge_base()
-        
-        # Initialize widgets
-        self.query_input = widgets.Textarea(
-            description='Query:',
-            layout={'width': '800px', 'height': '100px'}
-        )
-        
-        self.file_upload = widgets.FileUpload(
-            accept='.pdf,.txt,.docx,.md,.html',
-            multiple=True,
-            description='Upload Documents'
-        )
-        
-        self.search_button = widgets.Button(description='Search')
-        self.output_area = widgets.Output()
-        
-        # Set up event handlers
-        self.file_upload.observe(self.handle_upload, names='value')
-        self.search_button.on_click(self.handle_search)
-        
-        # Display widgets
-        display(HTML("<h2>Knowledge Base Query System</h2>"))
-        display(self.file_upload)
-        display(self.query_input)
-        display(self.search_button)
-        display(self.output_area)
-
-    def load_knowledge_base(self):
-        try:
-            if os.path.exists(self.knowledge_base_path):
-                with open(self.knowledge_base_path, 'r', encoding='utf-8') as f:
-                    self.knowledge_base = json.load(f)
-                    print(f"Loaded {len(self.knowledge_base)} documents")
-        except Exception as e:
-            logging.error(f"Error loading knowledge base: {str(e)}")
-            self.knowledge_base = {}
-
-    def save_knowledge_base(self):
-        try:
-            with open(self.knowledge_base_path, 'w', encoding='utf-8') as f:
-                json.dump(self.knowledge_base, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            logging.error(f"Error saving knowledge base: {str(e)}")
-
-    def add_document_to_knowledge_base(self, file_path):
-        try:
-            doc_id = os.path.basename(file_path)
-            doc_info = self.doc_processor.process_document(file_path)
-            
-            self.knowledge_base[doc_id] = {
-                'content': doc_info['content'],
-                'sections': doc_info['sections'],
-                'keywords': doc_info['keywords'],
-                'added_date': datetime.now().isoformat()
-            }
-            
-            self.save_knowledge_base()
-            print(f"Successfully added {doc_id}")
-            
-        except Exception as e:
-            logging.error(f"Error adding document {file_path}: {str(e)}")
-            raise
-
-    def search_knowledge_base(self, query, max_relevant_chunks=3):
-        try:
-            query_keywords = set(self.doc_processor._extract_keywords(query))
-            relevant_sections = []
-            
-            for doc_id, doc_info in self.knowledge_base.items():
-                for section in doc_info['sections']:
-                    section_keywords = set(self.doc_processor._extract_keywords(section['content']))
-                    relevance_score = len(query_keywords.intersection(section_keywords))
-                    
-                    if relevance_score > 0:
-                        relevant_sections.append({
-                            'doc_id': doc_id,
-                            'content': section['content'],
-                            'score': relevance_score
-                        })
-            
-            relevant_sections.sort(key=lambda x: x['score'], reverse=True)
-            return relevant_sections[:max_relevant_chunks]
-            
-        except Exception as e:
-            logging.error(f"Error searching knowledge base: {str(e)}")
-            return []
-
-    def generate_response(self, query, additional_context=""):
-        try:
-            relevant_docs = self.search_knowledge_base(query)
-            
-            if not relevant_docs:
-                return "No relevant information found in the knowledge base."
-            
-            context = "\n\n".join([f"From document ({doc['doc_id']}):\n{doc['content']}" 
-                                 for doc in relevant_docs])
-            
-            prompt = f"""
-User Query: {query}
-
-Additional Context (if provided): {additional_context}
-
-Relevant Information from Knowledge Base:
-{context}
-
-Please provide a comprehensive response following these guidelines:
-
-1. Answer Accuracy:
-   - Use ONLY information from the provided documentation
-   - If information is insufficient, clearly state what cannot be answered
-   - Do not make assumptions or add information not present in the sources
-
-2. Response Structure:
-   - Start with a direct answer to the query
-   - Provide relevant details and context
-   - Include step by step instructions if applicable
-   - List any prerequisites or dependencies mentioned
-
-3. Source Attribution:
-   - Reference specific documents for key information
-   - Indicate which document contains which part of the answer
-
-4. Technical Details:
-   - Include any specific technical parameters mentioned
-   - Note any version requirements or compatibility issues
-   - Highlight any warnings or important considerations
-
-5. Additional Considerations:
-   - Mention any related topics that might be relevant
-   - Note any limitations or edge cases
-   - Suggest related queries if applicable
-
-Remember: Base your response ONLY on the provided documentation. If certain aspects of the query cannot be answered from the available information, explicitly state this limitation.
-"""
-            
-            response = self.model.generate_content(prompt)
-            return response.text
-            
-        except Exception as e:
-            logging.error(f"Error generating response: {str(e)}")
-            raise
-
-    def handle_upload(self, change):
-        with self.output_area:
-            self.output_area.clear_output()
+        for file_path in all_files:
             try:
-                for filename, file_data in change['new'].items():
-                    content = file_data['content']
-                    temp_path = f"temp_{filename}"
+                file_name = os.path.basename(file_path)
+                file_extension = os.path.splitext(file_path)[1].lower()
+                
+                if file_extension == '.txt':
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        self.documents[file_name] = f.read()
+                        
+                elif file_extension == '.docx':
+                    doc = docx.Document(file_path)
+                    content = '\n'.join([paragraph.text for paragraph in doc.paragraphs])
+                    self.documents[file_name] = content
                     
-                    with open(temp_path, 'wb') as f:
-                        f.write(content)
-                    
-                    self.add_document_to_knowledge_base(temp_path)
-                    os.remove(temp_path)
-                    
-                    print(f"Document uploaded successfully!")
+                elif file_extension == '.pdf':
+                    with open(file_path, 'rb') as f:
+                        pdf_reader = PyPDF2.PdfReader(f)
+                        content = ''
+                        for page_num in range(len(pdf_reader.pages)):
+                            content += pdf_reader.pages[page_num].extract_text()
+                        self.documents[file_name] = content
+                
+                else:
+                    print(f"Unsupported file type: {file_extension} for file {file_name}")
                     
             except Exception as e:
-                print(f"Error uploading documents: {str(e)}")
-
-    def handle_search(self, button):
-        with self.output_area:
-            self.output_area.clear_output()
-            query = self.query_input.value.strip()
+                print(f"Error processing file {file_path}: {str(e)}")
+                
+        return self.documents
+    
+    def create_document_embeddings(self):
+        """Create TF-IDF embeddings for all documents."""
+        if not self.documents:
+            self.load_all_documents()
             
-            if query:
-                try:
-                    response = self.generate_response(query)
-                    print("Query:", query)
-                    print("\nResponse:")
-                    print(response)
-                except Exception as e:
-                    print(f"Error processing query: {str(e)}")
+        docs_content = list(self.documents.values())
+        doc_names = list(self.documents.keys())
+        
+        # Fit and transform to get document embeddings
+        tfidf_matrix = self.vectorizer.fit_transform(docs_content)
+        
+        # Store embeddings with their document names
+        for i, doc_name in enumerate(doc_names):
+            self.doc_embeddings[doc_name] = tfidf_matrix[i]
+    
+    def preprocess_text(self, text: str) -> str:
+        """
+        Preprocess text for better matching.
+        
+        Args:
+            text: Text to preprocess
+            
+        Returns:
+            Preprocessed text
+        """
+        # Convert to lowercase
+        text = text.lower()
+        
+        # Process with spaCy for better tokenization and lemmatization
+        doc = nlp(text)
+        
+        # Get lemmatized tokens, excluding stopwords and punctuation
+        tokens = [token.lemma_ for token in doc if not token.is_stop and not token.is_punct]
+        
+        return ' '.join(tokens)
+    
+    def search_documents(self, query: str, top_k: int = 3) -> List[Tuple[str, float, str]]:
+        """
+        Search for documents relevant to the query.
+        
+        Args:
+            query: User query
+            top_k: Number of top results to return
+            
+        Returns:
+            List of tuples (doc_name, similarity_score, content)
+        """
+        if not self.doc_embeddings:
+            self.create_document_embeddings()
+        
+        # Preprocess the query
+        processed_query = self.preprocess_text(query)
+        
+        # Transform query using the same vectorizer
+        query_vector = self.vectorizer.transform([processed_query])
+        
+        results = []
+        
+        # Calculate similarity between query and all documents
+        for doc_name, doc_vector in self.doc_embeddings.items():
+            similarity = cosine_similarity(query_vector, doc_vector)[0][0]
+            results.append((doc_name, similarity, self.documents[doc_name]))
+            
+        # Sort by similarity (highest first) and return top_k results
+        results.sort(key=lambda x: x[1], reverse=True)
+        return results[:top_k]
+
+    def exact_keyword_search(self, keyword: str) -> List[Tuple[str, str]]:
+        """
+        Search for exact keyword matches in documents.
+        
+        Args:
+            keyword: Keyword to search for
+            
+        Returns:
+            List of tuples (doc_name, relevant_context)
+        """
+        if not self.documents:
+            self.load_all_documents()
+            
+        results = []
+        keyword_lower = keyword.lower()
+        
+        for doc_name, content in self.documents.items():
+            # Check if keyword exists in the document
+            if keyword_lower in content.lower():
+                # Extract context around the keyword
+                relevant_context = self.extract_context(content, keyword_lower)
+                if relevant_context:
+                    results.append((doc_name, relevant_context))
+                    
+        return results
+    
+    def extract_context(self, text: str, keyword: str, context_size: int = 200) -> str:
+        """
+        Extract context around a keyword in text.
+        
+        Args:
+            text: Full text to extract from
+            keyword: Keyword to find
+            context_size: Number of characters to extract around the keyword
+            
+        Returns:
+            Text with context around keyword
+        """
+        text_lower = text.lower()
+        keyword_lower = keyword.lower()
+        
+        # Find all occurrences of the keyword
+        matches = [match.start() for match in re.finditer(keyword_lower, text_lower)]
+        
+        if not matches:
+            return ""
+            
+        # Extract context around first occurrence
+        start_pos = max(0, matches[0] - context_size)
+        end_pos = min(len(text), matches[0] + len(keyword) + context_size)
+        
+        return text[start_pos:end_pos]
+
+
+class RAGSystem:
+    """Implements the Retrieval-Augmented Generation system."""
+    
+    def __init__(self, knowledge_base_path: str, project_id: str, location: str = "us-central1"):
+        """
+        Initialize the RAG system.
+        
+        Args:
+            knowledge_base_path: Path to the folder containing knowledge base documents
+            project_id: Google Cloud project ID
+            location: Google Cloud region
+        """
+        self.project_id = project_id
+        self.location = location
+        self.document_processor = DocumentProcessor(knowledge_base_path)
+        
+        # Initialize Vertex AI
+        aiplatform.init(project=project_id, location=location)
+        
+        # Set up Gemini model
+        try:
+            self.model = GenerativeModel(model_name="gemini-1.5-pro")
+        except Exception as e:
+            print(f"Error initializing Gemini model: {str(e)}")
+            # Fallback to Preview model if needed
+            try:
+                self.model = PreviewGenerativeModel(model_name="gemini-1.5-pro")
+                print("Using Preview Generative Model instead.")
+            except Exception as e2:
+                print(f"Error initializing Preview Gemini model: {str(e2)}")
+                raise
+    
+    def process_query(self, query: str) -> Dict[str, Any]:
+        """
+        Process a user query and generate a response.
+        
+        Args:
+            query: User query text
+            
+        Returns:
+            Dictionary with response information
+        """
+        # Load documents if not already loaded
+        if not self.document_processor.documents:
+            self.document_processor.load_all_documents()
+        
+        # Check if query is a simple keyword or a complete question
+        is_question = self._is_question(query)
+        
+        retrieved_docs = []
+        
+        if is_question:
+            # For questions, use semantic search to find relevant documents
+            results = self.document_processor.search_documents(query)
+            retrieved_docs = [(doc_name, content) for doc_name, score, content in results if score > 0.1]
+        else:
+            # For keywords, use exact matching first
+            retrieved_docs = self.document_processor.exact_keyword_search(query)
+            
+            # If no exact matches, fall back to semantic search
+            if not retrieved_docs:
+                results = self.document_processor.search_documents(query)
+                retrieved_docs = [(doc_name, content) for doc_name, score, content in results if score > 0.1]
+        
+        if not retrieved_docs:
+            # No relevant documents found
+            return {
+                "success": False,
+                "error": "No relevant information found for your query.",
+                "query": query,
+                "retrieved_docs": []
+            }
+        
+        # Generate response using Gemini
+        response = self._generate_summary(query, retrieved_docs)
+        
+        return {
+            "success": True,
+            "query": query,
+            "response": response,
+            "retrieved_docs": [doc_name for doc_name, _ in retrieved_docs]
+        }
+    
+    def _is_question(self, text: str) -> bool:
+        """
+        Determine if text is a question.
+        
+        Args:
+            text: Text to analyze
+            
+        Returns:
+            True if text appears to be a question
+        """
+        # Check for question marks
+        if '?' in text:
+            return True
+            
+        # Check for question words
+        question_starters = ['what', 'who', 'where', 'when', 'why', 'how', 'can', 'could', 'would', 'should', 'is', 'are', 'do', 'does']
+        first_word = text.lower().split()[0] if text else ""
+        
+        return first_word in question_starters
+    
+    def _generate_summary(self, query: str, retrieved_docs: List[Tuple[str, str]]) -> str:
+        """
+        Generate a summary response using Gemini.
+        
+        Args:
+            query: User query
+            retrieved_docs: List of (doc_name, content) tuples
+            
+        Returns:
+            Generated summary
+        """
+        # Prepare prompt for Gemini
+        context = "\n\n".join([f"Document: {doc_name}\nContent: {content}" for doc_name, content in retrieved_docs])
+        
+        prompt = f"""
+        You are an AI assistant tasked with providing accurate information based on the documents I provide.
+        
+        User Query: {query}
+        
+        Context from relevant documents:
+        {context}
+        
+        Please provide a clear and concise answer to the query based ONLY on the information in these documents.
+        Do not hallucinate or add information not present in the documents.
+        If the documents don't contain enough information to answer the query fully, acknowledge that limitation.
+        
+        Your response should be well-structured and directly address the user's query.
+        """
+        
+        try:
+            # Generate response
+            response = self.model.generate_content(prompt)
+            return response.text
+        except Exception as e:
+            print(f"Error generating content with Gemini: {str(e)}")
+            # Fallback solution - extract key sentences as summary
+            all_content = " ".join([content for _, content in retrieved_docs])
+            sentences = nltk.sent_tokenize(all_content)
+            
+            # Return first 5 sentences as a basic summary
+            basic_summary = " ".join(sentences[:5])
+            return f"(Note: AI summary generation failed, showing extracted content)\n\n{basic_summary}"
+    
+    def generate_pdf_report(self, query: str, response: str, retrieved_docs: List[str]) -> str:
+        """
+        Generate a PDF report of the response.
+        
+        Args:
+            query: User query
+            response: Generated response
+            retrieved_docs: List of document names used
+            
+        Returns:
+            Path to the generated PDF
+        """
+        # Create a temporary directory for the PDF
+        with tempfile.TemporaryDirectory() as temp_dir:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_path = os.path.join(temp_dir, f"response_{timestamp}.pdf")
+            
+            # Create the PDF
+            c = canvas.Canvas(output_path, pagesize=letter)
+            width, height = letter
+            
+            # Add title
+            c.setFont("Helvetica-Bold", 16)
+            c.drawString(72, height - 72, "Query Response Summary")
+            
+            # Add query
+            c.setFont("Helvetica-Bold", 12)
+            c.drawString(72, height - 100, "User Query:")
+            c.setFont("Helvetica", 12)
+            
+            # Handle long queries by wrapping text
+            text_object = c.beginText(72, height - 120)
+            text_object.setFont("Helvetica", 12)
+            
+            wrapped_query = self._wrap_text(query, 80)
+            for line in wrapped_query:
+                text_object.textLine(line)
+            
+            c.drawText(text_object)
+            
+            # Add response with wrapped text
+            y_position = height - 120 - (len(wrapped_query) * 15) - 30
+            c.setFont("Helvetica-Bold", 12)
+            c.drawString(72, y_position, "Response:")
+            
+            text_object = c.beginText(72, y_position - 20)
+            text_object.setFont("Helvetica", 12)
+            
+            wrapped_response = self._wrap_text(response, 80)
+            for line in wrapped_response:
+                text_object.textLine(line)
+            
+            c.drawText(text_object)
+            
+            # Add sources
+            y_position = y_position - 20 - (len(wrapped_response) * 15) - 30
+            
+            if y_position < 72:  # If we're running out of space, add a new page
+                c.showPage()
+                y_position = height - 72
+            
+            c.setFont("Helvetica-Bold", 12)
+            c.drawString(72, y_position, "Sources:")
+            
+            text_object = c.beginText(72, y_position - 20)
+            text_object.setFont("Helvetica", 10)
+            
+            for doc in retrieved_docs:
+                text_object.textLine(f"- {doc}")
+            
+            c.drawText(text_object)
+            
+            # Add timestamp
+            c.setFont("Helvetica", 10)
+            c.drawString(72, 72, f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            
+            c.save()
+            
+            # In a real environment, you would save this to a persistent location
+            # For this example, we'll return the path, but in Vertex AI Workbench
+            # you might want to use Google Cloud Storage
+            
+            return output_path
+    
+    def _wrap_text(self, text: str, width: int) -> List[str]:
+        """
+        Wrap text to fit within specified width.
+        
+        Args:
+            text: Text to wrap
+            width: Maximum line width in characters
+            
+        Returns:
+            List of wrapped lines
+        """
+        lines = []
+        for paragraph in text.split('\n'):
+            if len(paragraph) <= width:
+                lines.append(paragraph)
             else:
-                print("Please enter a query first.")
+                words = paragraph.split()
+                current_line = []
+                current_length = 0
+                
+                for word in words:
+                    if current_length + len(word) + len(current_line) <= width:
+                        current_line.append(word)
+                        current_length += len(word)
+                    else:
+                        lines.append(' '.join(current_line))
+                        current_line = [word]
+                        current_length = len(word)
+                
+                if current_line:
+                    lines.append(' '.join(current_line))
+        
+        return lines
+
+
+def main():
+    """Main function to run the RAG system."""
+    
+    # Configuration parameters
+    KNOWLEDGE_BASE_PATH = "knowledge_base_docs"  # Update with your actual path
+    PROJECT_ID = "your-project-id"  # Update with your GCP project ID
+    
+    # Initialize the RAG system
+    rag_system = RAGSystem(KNOWLEDGE_BASE_PATH, PROJECT_ID)
+    
+    # Example usage
+    while True:
+        query = input("\nEnter your query (or 'exit' to quit): ")
+        
+        if query.lower() == 'exit':
+            break
+            
+        print("\nProcessing your query...\n")
+        
+        # Process the query
+        result = rag_system.process_query(query)
+        
+        if result["success"]:
+            print("=" * 80)
+            print("RESPONSE:")
+            print("-" * 80)
+            print(result["response"])
+            print("=" * 80)
+            print("\nSources:", ", ".join(result["retrieved_docs"]))
+            
+            # Generate PDF report
+            try:
+                pdf_path = rag_system.generate_pdf_report(
+                    query, 
+                    result["response"], 
+                    result["retrieved_docs"]
+                )
+                print(f"\nPDF report generated at: {pdf_path}")
+            except Exception as e:
+                print(f"\nError generating PDF report: {str(e)}")
+        else:
+            print(f"Error: {result['error']}")
+
 
 if __name__ == "__main__":
-    PROJECT_ID = "cloud-workspace-poc-51731"
-    LOCATION = "us-central1"
-    interface = KnowledgeBaseInterface(PROJECT_ID, LOCATION)
+    main()
