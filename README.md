@@ -1,4 +1,4 @@
-# unstop
+www# unstop
 includes algorithms that will be scaled as per the requirements
 
 
@@ -762,3 +762,84 @@ def process_query_and_generate_pdf(rag_system, query):
 # Run the system if executed directly
 if __name__ == "__main__":
     main()
+
+def generate_pdf_report(self, query: str, response: str, retrieved_docs: List[str]) -> str:
+    """Generate a PDF report of the response."""
+    # Create a temporary directory for the PDF
+    with tempfile.TemporaryDirectory() as temp_dir:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = os.path.join(temp_dir, f"response_{timestamp}.pdf")
+        
+        # Create a PDF document
+        doc = SimpleDocTemplate(
+            output_path,
+            pagesize=letter,
+            rightMargin=72,
+            leftMargin=72,
+            topMargin=72,
+            bottomMargin=72
+        )
+        
+        # Create styles
+        styles = getSampleStyleSheet()
+        styles.add(ParagraphStyle(
+            name='Justify',
+            fontName='Helvetica',
+            fontSize=10,
+            leading=14,
+            alignment=TA_JUSTIFY
+        ))
+        
+        # Create elements for the PDF
+        elements = []
+        
+        # Add title
+        title_style = styles['Heading1']
+        title_style.alignment = TA_LEFT
+        elements.append(Paragraph(f"Summary: {query}", title_style))
+        elements.append(Spacer(1, 0.25 * inch))
+        
+        # Process markdown in response
+        paragraphs = response.split("\n\n")
+        for paragraph in paragraphs:
+            if paragraph.startswith("# "):
+                # Main heading
+                heading_text = paragraph[2:].strip()
+                elements.append(Paragraph(heading_text, styles['Heading1']))
+                elements.append(Spacer(1, 0.15 * inch))
+            elif paragraph.startswith("## "):
+                # Subheading
+                subheading_text = paragraph[3:].strip()
+                elements.append(Paragraph(subheading_text, styles['Heading2']))
+                elements.append(Spacer(1, 0.1 * inch))
+            elif paragraph.startswith("- "):
+                # List item
+                list_text = paragraph[2:].strip()
+                elements.append(Paragraph("• " + list_text, styles['Normal']))
+                elements.append(Spacer(1, 0.05 * inch))
+            else:
+                # Regular paragraph
+                elements.append(Paragraph(paragraph, styles['Justify']))
+                elements.append(Spacer(1, 0.1 * inch))
+        
+        # Add sources
+        elements.append(Paragraph("Sources", styles['Heading2']))
+        elements.append(Spacer(1, 0.1 * inch))
+        
+        for doc in retrieved_docs:
+            elements.append(Paragraph("• " + doc, styles['Normal']))
+            elements.append(Spacer(1, 0.05 * inch))
+        
+        # Add footer with timestamp
+        footer_text = f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        elements.append(Spacer(1, 0.5 * inch))
+        elements.append(Paragraph(footer_text, styles['Normal']))
+        
+        # Build the PDF
+        doc.build(elements)
+        
+        # In Vertex AI Workbench notebook environment
+        final_path = f"/home/jupyter/response_{timestamp}.pdf"
+        os.system(f"cp {output_path} {final_path}")
+        
+        return final_path
