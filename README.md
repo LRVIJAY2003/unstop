@@ -1,112 +1,98 @@
 """
-Parser for Confluence content.
+Utilities for extracting data from Confluence content.
 """
-import re
 import logging
+import re
 from bs4 import BeautifulSoup
 import pandas as pd
-from io import StringIO
 
 logger = logging.getLogger(__name__)
 
-def parse_confluence_content(html_content):
-    """Parse Confluence HTML content preserving structure.
+def extract_structured_data(html_content):
+    """Extract structured data from Confluence HTML.
     
     Args:
         html_content: HTML content from Confluence
         
     Returns:
-        str: Parsed content with structure preserved
+        dict: Dictionary with extracted data
     """
     if not html_content:
-        return ""
+        return {}
     
     soup = BeautifulSoup(html_content, 'html.parser')
     
-    # Process tables
-    tables = soup.find_all('table')
-    for table in tables:
-        try:
-            # Extract table data
-            rows = []
-            for tr in table.find_all('tr'):
-                cells = []
-                for td in tr.find_all(['td', 'th']):
-                    cells.append(td.get_text(strip=True))
-                rows.append(cells)
-            
-            # Convert to DataFrame and then to string
-            if rows:
-                df = pd.DataFrame(rows[1:], columns=rows[0] if rows else None)
-                table_str = df.to_string(index=False)
-                # Create a new tag with the table text
-                table_text = soup.new_tag('pre')
-                table_text.string = f"\nTABLE:\n{table_str}\n"
-                table.replace_with(table_text)
-        except Exception as e:
-            logger.warning(f"Error parsing table: {str(e)}")
+    # Extract headings and their content
+    headings_data = extract_headings_with_content(soup)
     
-    # Process code blocks
-    code_blocks = soup.find_all('ac:structured-macro', {'ac:name': 'code'})
-    for code_block in code_blocks:
-        try:
-            code_content = code_block.find('ac:plain-text-body')
-            if code_content:
-                code_text = code_content.get_text()
-                # Create a new tag with the code
-                formatted_code = soup.new_tag('pre')
-                formatted_code.string = f"\nCODE:\n{code_text}\n"
-                code_block.replace_with(formatted_code)
-        except Exception as e:
-            logger.warning(f"Error parsing code block: {str(e)}")
+    # Extract tables
+    tables_data = extract_tables(soup)
     
-    # Process lists
-    lists = soup.find_all(['ul', 'ol'])
-    for list_elem in lists:
-        try:
-            list_items = []
-            for idx, li in enumerate(list_elem.find_all('li')):
-                prefix = "• " if list_elem.name == 'ul' else f"{idx+1}. "
-                list_items.append(f"{prefix}{li.get_text(strip=True)}")
-            
-            # Create a new tag with the list text
-            list_text = soup.new_tag('div')
-            list_text.string = "\n".join(list_items)
-            list_elem.replace_with(list_text)
-        except Exception as e:
-            logger.warning(f"Error parsing list: {str(e)}")
+    # Extract lists
+    lists_data = extract_lists(soup)
     
-    # Process images
-    images = soup.find_all('ac:image')
-    for image in images:
-        try:
-            # Just add a placeholder for images
-            image_placeholder = soup.new_tag('p')
-            image_placeholder.string = "[IMAGE]"
-            image.replace_with(image_placeholder)
-        except Exception as e:
-            logger.warning(f"Error processing image: {str(e)}")
+    # Extract metadata
+    metadata = extract_metadata(soup)
     
-    # Get the text content
-    content = soup.get_text(separator="\n")
-    
-    # Clean up excessive newlines
-    content = re.sub(r'\n{3,}', '\n\n', content)
-    
-    return content
+    return {
+        'headings': headings_data,
+        'tables': tables_data,
+        'lists': lists_data,
+        'metadata': metadata
+    }
 
-
-def extract_tables_from_html(html_content):
-    """Extract tables from HTML content.
+def extract_headings_with_content(soup):
+    """Extract headings and their content.
     
     Args:
-        html_content: HTML content
+        soup: BeautifulSoup object
         
     Returns:
-        list: List of pandas DataFrames
+        list: List of dictionaries with heading and content
     """
-    soup = BeautifulSoup(html_content, 'html.parser')
-    tables = []
+    headings_data = []
+    headings = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+    
+    for heading in headings:
+        heading_text = heading.get_text(strip=True)
+        level = int(heading.name[1])  # Extract heading level (h1 -> 1, etc.)
+        
+        # Get content until next heading of same or higher level
+        content_elements = []
+        next_element = heading.next_sibling
+        
+        while next_element:
+            if next_element.name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
+                if int(next_element.name[1]) <= level:
+                    break
+            
+            if next_element.string and next_element.string.strip():
+                content_elements.append(next_element.string.strip())
+            elif next_element.get_text(strip=True):
+                content_elements.append(next_element.get_text(strip=True))
+                
+            next_element = next_element.next_sibling
+        
+        content = ' '.join(content_elements)
+        
+        headings_data.append({
+            'level': level,
+            'text': heading_text,
+            'content': content
+        })
+    
+    return headings_data
+
+def extract_tables(soup):
+    """Extract tables from the soup.
+    
+    Args:
+        soup: BeautifulSoup object
+        
+    Returns:
+        list: List of tables as pandas DataFrames converted to dictionaries
+    """
+    tables_data = []
     
     for table in soup.find_all('table'):
         rows = []
@@ -118,36 +104,97 @@ def extract_tables_from_html(html_content):
                 rows.append(cells)
         
         if rows:
-            # Use first row as header
-            df = pd.DataFrame(rows[1:], columns=rows[0] if len(rows) > 0 else None)
-            tables.append(df)
+            # Try to use first row as header
+            if len(rows) > 1:
+                df = pd.DataFrame(rows[1:], columns=rows[0])
+            else:
+                df = pd.DataFrame(rows)
+                
+            # Convert to dict for serialization
+            tables_data.append(df.to_dict(orient='records'))
     
-    return tables
+    return tables_data
 
+def extract_lists(soup):
+    """Extract lists from the soup.
+    
+    Args:
+        soup: BeautifulSoup object
+        
+    Returns:
+        list: List of dictionaries with list information
+    """
+    lists_data = []
+    
+    for list_elem in soup.find_all(['ul', 'ol']):
+        list_type = 'bullet' if list_elem.name == 'ul' else 'numbered'
+        items = [li.get_text(strip=True) for li in list_elem.find_all('li')]
+        
+        lists_data.append({
+            'type': list_type,
+            'items': items
+        })
+    
+    return lists_data
 
-def extract_code_blocks(html_content):
-    """Extract code blocks from HTML content.
+def extract_metadata(soup):
+    """Extract metadata from the soup.
+    
+    Args:
+        soup: BeautifulSoup object
+        
+    Returns:
+        dict: Dictionary with metadata
+    """
+    metadata = {}
+    
+    # Try to extract metadata from Confluence specific elements
+    meta_elements = soup.find_all('meta')
+    for meta in meta_elements:
+        name = meta.get('name', '')
+        content = meta.get('content', '')
+        if name and content:
+            metadata[name] = content
+    
+    # Extract page title
+    title = soup.find('title')
+    if title:
+        metadata['title'] = title.get_text(strip=True)
+    
+    return metadata
+
+def extract_code_samples(html_content):
+    """Extract code samples from HTML content.
     
     Args:
         html_content: HTML content
         
     Returns:
-        list: List of code blocks
+        list: List of code samples
     """
     soup = BeautifulSoup(html_content, 'html.parser')
-    code_blocks = []
+    code_samples = []
     
-    # Find Confluence code macros
-    for code_block in soup.find_all('ac:structured-macro', {'ac:name': 'code'}):
-        try:
-            code_content = code_block.find('ac:plain-text-body')
-            if code_content:
-                code_blocks.append(code_content.get_text())
-        except Exception as e:
-            logger.warning(f"Error extracting code block: {str(e)}")
+    # Confluence code macro
+    for code_macro in soup.find_all('ac:structured-macro', {'ac:name': 'code'}):
+        code = code_macro.find('ac:plain-text-body')
+        if code:
+            language_param = code_macro.find('ac:parameter', {'ac:name': 'language'})
+            language = language_param.get_text() if language_param else 'text'
+            
+            code_samples.append({
+                'code': code.get_text(),
+                'language': language
+            })
     
-    # Also find standard code elements
+    # Standard HTML code elements
     for code in soup.find_all('code'):
-        code_blocks.append(code.get_text())
+        parent = code.find_parent('pre')
+        language = parent.get('class', [''])[0].replace('language-', '') if parent and parent.get('class') else 'text'
+        
+        code_samples.append({
+            'code': code.get_text(),
+            'language': language
+        })
     
-    return code_blocks
+    return code_samples
