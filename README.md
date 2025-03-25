@@ -1,142 +1,153 @@
 """
-Client for interacting with Confluence.
+Parser for Confluence content.
 """
+import re
 import logging
-import requests
-from atlassian import Confluence
 from bs4 import BeautifulSoup
-import html2text
-
-from src.confluence.parser import parse_confluence_content
-from src.utils.cache import cache_result
+import pandas as pd
+from io import StringIO
 
 logger = logging.getLogger(__name__)
 
-class ConfluenceClient:
-    """Client for interacting with Confluence API."""
+def parse_confluence_content(html_content):
+    """Parse Confluence HTML content preserving structure.
     
-    def __init__(self, url, username, api_token, space_id):
-        """Initialize the Confluence client.
+    Args:
+        html_content: HTML content from Confluence
         
-        Args:
-            url: Confluence URL
-            username: Confluence username/email
-            api_token: Confluence API token
-            space_id: Confluence space ID
-        """
-        self.url = url
-        self.username = username
-        self.api_token = api_token
-        self.space_id = space_id
-        
-        self.client = Confluence(
-            url=url,
-            username=username,
-            password=api_token,
-            cloud=True  # Set to False if using server installation
-        )
-        
-        self.h2t = html2text.HTML2Text()
-        self.h2t.ignore_links = False
-        self.h2t.ignore_images = False
-        self.h2t.ignore_tables = False
-        
-    def check_connection(self):
-        """Check if the connection to Confluence is working.
-        
-        Returns:
-            bool: True if connection is successful, False otherwise
-        """
-        try:
-            self.client.get_space(self.space_id)
-            return True
-        except Exception as e:
-            logger.error(f"Failed to connect to Confluence: {str(e)}")
-            return False
+    Returns:
+        str: Parsed content with structure preserved
+    """
+    if not html_content:
+        return ""
     
-    @cache_result(ttl=3600)  # Cache for 1 hour
-    def search_content(self, query, limit=5):
-        """Search for content in Confluence.
-        
-        Args:
-            query: Search query
-            limit: Maximum number of results to return
-            
-        Returns:
-            list: List of dictionaries containing page info and content
-        """
-        try:
-            # Search for pages matching the query
-            cql = f'space="{self.space_id}" AND text ~ "{query}"'
-            search_results = self.client.cql(cql, limit=limit)
-            
-            results = []
-            for result in search_results.get('results', []):
-                page_id = result.get('content', {}).get('id')
-                if not page_id:
-                    continue
-                
-                # Get page content
-                page = self.client.get_page_by_id(
-                    page_id, 
-                    expand='body.storage,version'
-                )
-                
-                # Extract and parse HTML content
-                html_content = page.get('body', {}).get('storage', {}).get('value', '')
-                text_content = self.h2t.handle(html_content)
-                
-                # Parse content with tables, lists, etc.
-                parsed_content = parse_confluence_content(html_content)
-                
-                results.append({
-                    'id': page_id,
-                    'title': page.get('title', ''),
-                    'url': f"{self.url}/wiki/spaces/{self.space_id}/pages/{page_id}",
-                    'content': parsed_content,
-                    'text_content': text_content,
-                    'last_updated': page.get('version', {}).get('when', '')
-                })
-            
-            return results
-            
-        except Exception as e:
-            logger.error(f"Error searching Confluence: {str(e)}")
-            raise
+    soup = BeautifulSoup(html_content, 'html.parser')
     
-    def get_page_attachments(self, page_id):
-        """Get attachments for a page.
-        
-        Args:
-            page_id: Confluence page ID
-            
-        Returns:
-            list: List of attachment metadata
-        """
+    # Process tables
+    tables = soup.find_all('table')
+    for table in tables:
         try:
-            attachments = self.client.get_attachments_from_content(page_id)
-            return attachments.get('results', [])
+            # Extract table data
+            rows = []
+            for tr in table.find_all('tr'):
+                cells = []
+                for td in tr.find_all(['td', 'th']):
+                    cells.append(td.get_text(strip=True))
+                rows.append(cells)
+            
+            # Convert to DataFrame and then to string
+            if rows:
+                df = pd.DataFrame(rows[1:], columns=rows[0] if rows else None)
+                table_str = df.to_string(index=False)
+                # Create a new tag with the table text
+                table_text = soup.new_tag('pre')
+                table_text.string = f"\nTABLE:\n{table_str}\n"
+                table.replace_with(table_text)
         except Exception as e:
-            logger.error(f"Error getting page attachments: {str(e)}")
-            return []
+            logger.warning(f"Error parsing table: {str(e)}")
     
-    def get_attachment_content(self, page_id, attachment_id, filename):
-        """Get attachment content.
-        
-        Args:
-            page_id: Confluence page ID
-            attachment_id: Attachment ID
-            filename: Attachment filename
-            
-        Returns:
-            bytes: Attachment content as bytes
-        """
+    # Process code blocks
+    code_blocks = soup.find_all('ac:structured-macro', {'ac:name': 'code'})
+    for code_block in code_blocks:
         try:
-            return self.client.download_attachment(
-                page_id, 
-                attachment_id, 
-                filename
-            )
+            code_content = code_block.find('ac:plain-text-body')
+            if code_content:
+                code_text = code_content.get_text()
+                # Create a new tag with the code
+                formatted_code = soup.new_tag('pre')
+                formatted_code.string = f"\nCODE:\n{code_text}\n"
+                code_block.replace_with(formatted_code)
         except Exception as e:
-            logger.error(f"Error downloading attachment: {str(e)}")
-            return None
+            logger.warning(f"Error parsing code block: {str(e)}")
+    
+    # Process lists
+    lists = soup.find_all(['ul', 'ol'])
+    for list_elem in lists:
+        try:
+            list_items = []
+            for idx, li in enumerate(list_elem.find_all('li')):
+                prefix = "• " if list_elem.name == 'ul' else f"{idx+1}. "
+                list_items.append(f"{prefix}{li.get_text(strip=True)}")
+            
+            # Create a new tag with the list text
+            list_text = soup.new_tag('div')
+            list_text.string = "\n".join(list_items)
+            list_elem.replace_with(list_text)
+        except Exception as e:
+            logger.warning(f"Error parsing list: {str(e)}")
+    
+    # Process images
+    images = soup.find_all('ac:image')
+    for image in images:
+        try:
+            # Just add a placeholder for images
+            image_placeholder = soup.new_tag('p')
+            image_placeholder.string = "[IMAGE]"
+            image.replace_with(image_placeholder)
+        except Exception as e:
+            logger.warning(f"Error processing image: {str(e)}")
+    
+    # Get the text content
+    content = soup.get_text(separator="\n")
+    
+    # Clean up excessive newlines
+    content = re.sub(r'\n{3,}', '\n\n', content)
+    
+    return content
+
+
+def extract_tables_from_html(html_content):
+    """Extract tables from HTML content.
+    
+    Args:
+        html_content: HTML content
+        
+    Returns:
+        list: List of pandas DataFrames
+    """
+    soup = BeautifulSoup(html_content, 'html.parser')
+    tables = []
+    
+    for table in soup.find_all('table'):
+        rows = []
+        for tr in table.find_all('tr'):
+            cells = []
+            for td in tr.find_all(['td', 'th']):
+                cells.append(td.get_text(strip=True))
+            if cells:
+                rows.append(cells)
+        
+        if rows:
+            # Use first row as header
+            df = pd.DataFrame(rows[1:], columns=rows[0] if len(rows) > 0 else None)
+            tables.append(df)
+    
+    return tables
+
+
+def extract_code_blocks(html_content):
+    """Extract code blocks from HTML content.
+    
+    Args:
+        html_content: HTML content
+        
+    Returns:
+        list: List of code blocks
+    """
+    soup = BeautifulSoup(html_content, 'html.parser')
+    code_blocks = []
+    
+    # Find Confluence code macros
+    for code_block in soup.find_all('ac:structured-macro', {'ac:name': 'code'}):
+        try:
+            code_content = code_block.find('ac:plain-text-body')
+            if code_content:
+                code_blocks.append(code_content.get_text())
+        except Exception as e:
+            logger.warning(f"Error extracting code block: {str(e)}")
+    
+    # Also find standard code elements
+    for code in soup.find_all('code'):
+        code_blocks.append(code.get_text())
+    
+    return code_blocks
