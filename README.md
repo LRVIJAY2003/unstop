@@ -1,200 +1,266 @@
 """
-Utilities for extracting data from Confluence content.
+Client for interacting with BMC Remedy.
 """
 import logging
-import re
-from bs4 import BeautifulSoup
-import pandas as pd
+import json
+import requests
+from requests.auth import HTTPBasicAuth
+
+from src.utils.cache import cache_result
 
 logger = logging.getLogger(__name__)
 
-def extract_structured_data(html_content):
-    """Extract structured data from Confluence HTML.
+class RemedyClient:
+    """Client for interacting with Remedy API."""
     
-    Args:
-        html_content: HTML content from Confluence
+    def __init__(self, server, api_base, username, password):
+        """Initialize the Remedy client.
         
-    Returns:
-        dict: Dictionary with extracted data
-    """
-    if not html_content:
-        return {}
-    
-    soup = BeautifulSoup(html_content, 'html.parser')
-    
-    # Extract headings and their content
-    headings_data = extract_headings_with_content(soup)
-    
-    # Extract tables
-    tables_data = extract_tables(soup)
-    
-    # Extract lists
-    lists_data = extract_lists(soup)
-    
-    # Extract metadata
-    metadata = extract_metadata(soup)
-    
-    return {
-        'headings': headings_data,
-        'tables': tables_data,
-        'lists': lists_data,
-        'metadata': metadata
-    }
-
-def extract_headings_with_content(soup):
-    """Extract headings and their content.
-    
-    Args:
-        soup: BeautifulSoup object
+        Args:
+            server: Remedy server hostname
+            api_base: Base URL for Remedy API
+            username: Remedy username
+            password: Remedy password
+        """
+        self.server = server
+        self.api_base = api_base
+        self.username = username
+        self.password = password
         
-    Returns:
-        list: List of dictionaries with heading and content
-    """
-    headings_data = []
-    headings = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+        # API endpoints
+        self.login_url = f"{api_base}/api/jwt/login"
+        self.logout_url = f"{api_base}/api/jwt/logout"
+        self.ticket_url = f"{api_base}/api/arsys/v1/entry/HPD:Help"
+        
+        # Authentication token
+        self.token = None
+        self.logged_in = False
     
-    for heading in headings:
-        heading_text = heading.get_text(strip=True)
-        level = int(heading.name[1])  # Extract heading level (h1 -> 1, etc.)
-        
-        # Get content until next heading of same or higher level
-        content_elements = []
-        next_element = heading.next_sibling
-        
-        while next_element:
-            if next_element.name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
-                if int(next_element.name[1]) <= level:
-                    break
+    def _do_login(self):
+        """Login to Remedy API and get authentication token."""
+        if self.logged_in:
+            return True
             
-            if next_element.string and next_element.string.strip():
-                content_elements.append(next_element.string.strip())
-            elif next_element.get_text(strip=True):
-                content_elements.append(next_element.get_text(strip=True))
-                
-            next_element = next_element.next_sibling
-        
-        content = ' '.join(content_elements)
-        
-        headings_data.append({
-            'level': level,
-            'text': heading_text,
-            'content': content
-        })
-    
-    return headings_data
-
-def extract_tables(soup):
-    """Extract tables from the soup.
-    
-    Args:
-        soup: BeautifulSoup object
-        
-    Returns:
-        list: List of tables as pandas DataFrames converted to dictionaries
-    """
-    tables_data = []
-    
-    for table in soup.find_all('table'):
-        rows = []
-        for tr in table.find_all('tr'):
-            cells = []
-            for td in tr.find_all(['td', 'th']):
-                cells.append(td.get_text(strip=True))
-            if cells:
-                rows.append(cells)
-        
-        if rows:
-            # Try to use first row as header
-            if len(rows) > 1:
-                df = pd.DataFrame(rows[1:], columns=rows[0])
+        try:
+            # Prepare login payload
+            payload = {
+                'username': self.username,
+                'password': self.password
+            }
+            
+            # Set request headers
+            headers = {
+                'Content-Type': 'application/x-www-form-urlencoded'
+            }
+            
+            # Make login request
+            response = requests.post(
+                self.login_url,
+                data=payload,
+                headers=headers,
+                verify=False  # TODO: Enable verification with proper certificates
+            )
+            
+            # Check if login was successful
+            if response.status_code == 200:
+                self.token = response.text
+                self.logged_in = True
+                logger.info("Successfully logged in to Remedy API")
+                return True
             else:
-                df = pd.DataFrame(rows)
+                logger.error(f"Failed to login to Remedy: {response.status_code} - {response.text}")
+                return False
                 
-            # Convert to dict for serialization
-            tables_data.append(df.to_dict(orient='records'))
+        except Exception as e:
+            logger.error(f"Error logging in to Remedy: {str(e)}")
+            return False
     
-    return tables_data
-
-def extract_lists(soup):
-    """Extract lists from the soup.
-    
-    Args:
-        soup: BeautifulSoup object
-        
-    Returns:
-        list: List of dictionaries with list information
-    """
-    lists_data = []
-    
-    for list_elem in soup.find_all(['ul', 'ol']):
-        list_type = 'bullet' if list_elem.name == 'ul' else 'numbered'
-        items = [li.get_text(strip=True) for li in list_elem.find_all('li')]
-        
-        lists_data.append({
-            'type': list_type,
-            'items': items
-        })
-    
-    return lists_data
-
-def extract_metadata(soup):
-    """Extract metadata from the soup.
-    
-    Args:
-        soup: BeautifulSoup object
-        
-    Returns:
-        dict: Dictionary with metadata
-    """
-    metadata = {}
-    
-    # Try to extract metadata from Confluence specific elements
-    meta_elements = soup.find_all('meta')
-    for meta in meta_elements:
-        name = meta.get('name', '')
-        content = meta.get('content', '')
-        if name and content:
-            metadata[name] = content
-    
-    # Extract page title
-    title = soup.find('title')
-    if title:
-        metadata['title'] = title.get_text(strip=True)
-    
-    return metadata
-
-def extract_code_samples(html_content):
-    """Extract code samples from HTML content.
-    
-    Args:
-        html_content: HTML content
-        
-    Returns:
-        list: List of code samples
-    """
-    soup = BeautifulSoup(html_content, 'html.parser')
-    code_samples = []
-    
-    # Confluence code macro
-    for code_macro in soup.find_all('ac:structured-macro', {'ac:name': 'code'}):
-        code = code_macro.find('ac:plain-text-body')
-        if code:
-            language_param = code_macro.find('ac:parameter', {'ac:name': 'language'})
-            language = language_param.get_text() if language_param else 'text'
+    def _logout(self):
+        """Logout from Remedy API."""
+        if not self.logged_in or not self.token:
+            return True
             
-            code_samples.append({
-                'code': code.get_text(),
-                'language': language
-            })
+        try:
+            # Set request headers
+            headers = {
+                'Authorization': f"AR-JWT {self.token}"
+            }
+            
+            # Make logout request
+            response = requests.post(
+                self.logout_url,
+                headers=headers,
+                verify=False  # TODO: Enable verification with proper certificates
+            )
+            
+            # Check if logout was successful
+            if response.status_code == 204:
+                self.token = None
+                self.logged_in = False
+                logger.info("Successfully logged out from Remedy API")
+                return True
+            else:
+                logger.error(f"Failed to logout from Remedy: {response.status_code} - {response.text}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error logging out from Remedy: {str(e)}")
+            return False
     
-    # Standard HTML code elements
-    for code in soup.find_all('code'):
-        parent = code.find_parent('pre')
-        language = parent.get('class', [''])[0].replace('language-', '') if parent and parent.get('class') else 'text'
+    def check_connection(self):
+        """Check if the connection to Remedy is working.
         
-        code_samples.append({
-            'code': code.get_text(),
-            'language': language
-        })
+        Returns:
+            bool: True if connection is successful, False otherwise
+        """
+        try:
+            return self._do_login() and self._logout()
+        except Exception as e:
+            logger.error(f"Failed to connect to Remedy: {str(e)}")
+            return False
     
-    return code_samples
+    @cache_result(ttl=300)  # Cache for 5 minutes
+    def search_tickets(self, query, limit=10):
+        """Search for tickets in Remedy.
+        
+        Args:
+            query: Search query
+            limit: Maximum number of results to return
+            
+        Returns:
+            list: List of dictionaries containing ticket information
+        """
+        try:
+            # Login to get token
+            if not self._do_login():
+                logger.error("Failed to login to Remedy")
+                return []
+                
+            # Create authentication headers
+            headers = {
+                'Authorization': f"AR-JWT {self.token}",
+                'Content-Type': 'application/json'
+            }
+            
+            # Create query parameters
+            # Using a simple query to get tickets with terms in Status or Description
+            query_params = {
+                'q': f"'Description' LIKE \"%{query}%\"",
+                'limit': limit,
+                'fields': 'values(ID, Status, Description, Submitter, "Request Assignee", "Impact", Priority)'
+            }
+            
+            # Make search request
+            response = requests.get(
+                self.ticket_url,
+                headers=headers,
+                params=query_params,
+                verify=False  # TODO: Enable verification with proper certificates
+            )
+            
+            # Check if search was successful
+            if response.status_code == 200:
+                data = response.json()
+                entries = data.get('entries', [])
+                
+                # Format ticket data
+                tickets = []
+                for entry in entries:
+                    values = entry.get('values', {})
+                    tickets.append({
+                        'id': values.get('ID', ''),
+                        'status': values.get('Status', ''),
+                        'description': values.get('Description', ''),
+                        'submitter': values.get('Submitter', ''),
+                        'assignee': values.get('Request Assignee', ''),
+                        'impact': values.get('Impact', ''),
+                        'priority': values.get('Priority', '')
+                    })
+                
+                # Logout to clean up
+                self._logout()
+                
+                return tickets
+            else:
+                logger.error(f"Failed to search Remedy tickets: {response.status_code} - {response.text}")
+                # Logout to clean up
+                self._logout()
+                return []
+                
+        except Exception as e:
+            logger.error(f"Error searching Remedy tickets: {str(e)}")
+            # Try to logout anyway
+            try:
+                self._logout()
+            except:
+                pass
+            return []
+    
+    def get_ticket_details(self, ticket_id):
+        """Get detailed information for a specific ticket.
+        
+        Args:
+            ticket_id: Ticket ID
+            
+        Returns:
+            dict: Dictionary containing ticket details
+        """
+        try:
+            # Login to get token
+            if not self._do_login():
+                logger.error("Failed to login to Remedy")
+                return {}
+                
+            # Create authentication headers
+            headers = {
+                'Authorization': f"AR-JWT {self.token}",
+                'Content-Type': 'application/json'
+            }
+            
+            # Make request to get ticket details
+            response = requests.get(
+                f"{self.ticket_url}/{ticket_id}",
+                headers=headers,
+                verify=False  # TODO: Enable verification with proper certificates
+            )
+            
+            # Check if request was successful
+            if response.status_code == 200:
+                data = response.json()
+                values = data.get('values', {})
+                
+                # Format ticket details
+                ticket_details = {
+                    'id': values.get('Incident Number', ''),
+                    'status': values.get('Status', ''),
+                    'description': values.get('Description', ''),
+                    'submitter': values.get('Submitter', ''),
+                    'assignee': values.get('Assignee', ''),
+                    'assignee_group': values.get('Assignee Group', ''),
+                    'impact': values.get('Impact', ''),
+                    'priority': values.get('Priority', ''),
+                    'urgency': values.get('Urgency', ''),
+                    'reported_source': values.get('Reported Source', ''),
+                    'last_modified': values.get('Last Modified Date', ''),
+                    'create_date': values.get('Create Date', ''),
+                    'resolution': values.get('Resolution', '')
+                }
+                
+                # Logout to clean up
+                self._logout()
+                
+                return ticket_details
+            else:
+                logger.error(f"Failed to get ticket details: {response.status_code} - {response.text}")
+                # Logout to clean up
+                self._logout()
+                return {}
+                
+        except Exception as e:
+            logger.error(f"Error getting ticket details: {str(e)}")
+            # Try to logout anyway
+            try:
+                self._logout()
+            except:
+                pass
+            return {}
