@@ -1,246 +1,205 @@
 """
-Text embedding utilities for the RAG system.
+Document retrieval for the RAG system.
 """
 import logging
 import os
 import numpy as np
-import pickle
-from typing import List, Dict, Any, Union
+from typing import List, Dict, Any, Tuple, Union
+
+from src.rag.chunker import DocumentChunker
+from src.rag.embedder import TextEmbedder
+from src.rag.ranker import SnippetRanker
 
 logger = logging.getLogger(__name__)
 
-class TextEmbedder:
-    """Class for embedding text using various models."""
+class DocumentRetriever:
+    """Class for retrieving relevant document snippets."""
     
-    def __init__(self, model_name="all-MiniLM-L6-v2", cache_dir="cache"):
-        """Initialize the text embedder.
+    def __init__(self, embedding_model="all-MiniLM-L6-v2", chunk_size=500, chunk_overlap=100, cache_dir="cache"):
+        """Initialize the document retriever.
         
         Args:
-            model_name: Name of the sentence transformer model
+            embedding_model: Name of the embedding model to use
+            chunk_size: Size of chunks in characters
+            chunk_overlap: Overlap between chunks in characters
             cache_dir: Directory to cache embeddings
         """
-        self.model_name = model_name
+        self.chunk_size = chunk_size
+        self.chunk_overlap = chunk_overlap
         self.cache_dir = cache_dir
-        self.model = None
+        
+        # Create components
+        self.chunker = DocumentChunker(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+        self.embedder = TextEmbedder(model_name=embedding_model, cache_dir=cache_dir)
+        self.ranker = SnippetRanker()
         
         # Create cache directory if it doesn't exist
         os.makedirs(cache_dir, exist_ok=True)
-        
-        # Embedding cache
-        self.embedding_cache = {}
-        self.embedding_cache_file = os.path.join(cache_dir, f"{model_name.replace('/', '_')}_cache.pkl")
-        
-        # Load cache if it exists
-        self._load_cache()
     
-    def load_model(self):
-        """Load the sentence transformer model."""
-        if self.model is not None:
-            return
-            
-        try:
-            from sentence_transformers import SentenceTransformer
-            self.model = SentenceTransformer(self.model_name)
-            logger.info(f"Loaded sentence transformer model: {self.model_name}")
-        except ImportError:
-            logger.warning("SentenceTransformer not available, falling back to simpler methods")
-            self.model = None
-    
-    def _load_cache(self):
-        """Load embedding cache from disk."""
-        if os.path.exists(self.embedding_cache_file):
-            try:
-                with open(self.embedding_cache_file, 'rb') as f:
-                    self.embedding_cache = pickle.load(f)
-                logger.info(f"Loaded {len(self.embedding_cache)} cached embeddings")
-            except Exception as e:
-                logger.error(f"Error loading embedding cache: {str(e)}")
-                self.embedding_cache = {}
-    
-    def _save_cache(self):
-        """Save embedding cache to disk."""
-        try:
-            with open(self.embedding_cache_file, 'wb') as f:
-                pickle.dump(self.embedding_cache, f)
-            logger.info(f"Saved {len(self.embedding_cache)} embeddings to cache")
-        except Exception as e:
-            logger.error(f"Error saving embedding cache: {str(e)}")
-    
-    def get_embedding(self, text: str) -> np.ndarray:
-        """Get embedding for a single text.
-        
-        Args:
-            text: Text to embed
-            
-        Returns:
-            np.ndarray: Embedding vector
-        """
-        if not text:
-            # Return zero vector for empty text
-            return np.zeros(384)  # Default size for most models
-            
-        # Check cache
-        if text in self.embedding_cache:
-            return self.embedding_cache[text]
-            
-        # Load model if not already loaded
-        self.load_model()
-        
-        if self.model:
-            # Generate embedding using sentence transformer
-            embedding = self.model.encode(text, convert_to_numpy=True)
-        else:
-            # Fall back to simpler method if model is not available
-            embedding = self._simple_embedding(text)
-            
-        # Cache the embedding
-        self.embedding_cache[text] = embedding
-        
-        # Save cache periodically (every 100 new embeddings)
-        if len(self.embedding_cache) % 100 == 0:
-            self._save_cache()
-            
-        return embedding
-    
-    def get_embeddings(self, texts: List[str]) -> List[np.ndarray]:
-        """Get embeddings for multiple texts.
-        
-        Args:
-            texts: List of texts to embed
-            
-        Returns:
-            list: List of embedding vectors
-        """
-        # Filter out empty texts
-        non_empty_texts = [(i, text) for i, text in enumerate(texts) if text]
-        indices, valid_texts = zip(*non_empty_texts) if non_empty_texts else ([], [])
-        
-        # Check cache for each text
-        embeddings = [None] * len(texts)
-        texts_to_embed = []
-        texts_indices = []
-        
-        for i, text in zip(indices, valid_texts):
-            if text in self.embedding_cache:
-                embeddings[i] = self.embedding_cache[text]
-            else:
-                texts_to_embed.append(text)
-                texts_indices.append(i)
-        
-        if texts_to_embed:
-            # Load model if not already loaded
-            self.load_model()
-            
-            if self.model:
-                # Generate embeddings using sentence transformer
-                batch_embeddings = self.model.encode(texts_to_embed, convert_to_numpy=True)
-            else:
-                # Fall back to simpler method
-                batch_embeddings = [self._simple_embedding(text) for text in texts_to_embed]
-                
-            # Update embeddings and cache
-            for i, embedding in zip(texts_indices, batch_embeddings):
-                embeddings[i] = embedding
-                self.embedding_cache[texts[i]] = embedding
-                
-            # Save cache if we've added several new embeddings
-            if len(texts_to_embed) > 10:
-                self._save_cache()
-        
-        # Fill in empty slots with zero vectors
-        default_dim = 384  # Default size
-        if any(embeddings):
-            default_dim = embeddings[indices[0]].shape[0] if indices else default_dim
-            
-        for i in range(len(embeddings)):
-            if embeddings[i] is None:
-                embeddings[i] = np.zeros(default_dim)
-                
-        return embeddings
-    
-    def _simple_embedding(self, text: str) -> np.ndarray:
-        """Simple fallback embedding method.
-        
-        Args:
-            text: Text to embed
-            
-        Returns:
-            np.ndarray: Embedding vector
-        """
-        try:
-            from sklearn.feature_extraction.text import TfidfVectorizer
-            
-            # Create a small corpus with just this text
-            corpus = [text]
-            vectorizer = TfidfVectorizer(max_features=384)
-            tfidf_matrix = vectorizer.fit_transform(corpus)
-            
-            # Convert to dense and resize to standard dimensions
-            embedding = tfidf_matrix.toarray()[0]
-            
-            # Pad or truncate to get standard size
-            if len(embedding) < 384:
-                embedding = np.pad(embedding, (0, 384 - len(embedding)))
-            elif len(embedding) > 384:
-                embedding = embedding[:384]
-                
-            return embedding
-            
-        except ImportError:
-            # If sklearn is not available, use an even simpler approach
-            logger.warning("TfidfVectorizer not available, using very simple embedding")
-            
-            # Create a simple bag-of-words vector
-            words = set(text.lower().split())
-            # Simple hash-based embedding
-            embedding = np.zeros(384)
-            
-            for word in words:
-                # Simple hash function to distribute words
-                hash_val = hash(word) % 384
-                embedding[hash_val] += 1
-                
-            # Normalize
-            norm = np.linalg.norm(embedding)
-            if norm > 0:
-                embedding = embedding / norm
-                
-            return embedding
-    
-    def get_document_embeddings(self, documents: List[Dict[str, Any]]) -> Dict[str, np.ndarray]:
-        """Get embeddings for a list of documents.
+    def chunk_documents(self, documents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Chunk documents into smaller pieces.
         
         Args:
             documents: List of document dictionaries with 'content' field
             
         Returns:
-            dict: Dictionary mapping document IDs to embedding vectors
+            list: List of chunk dictionaries
         """
-        # Extract document contents and IDs
-        contents = [doc.get('content', '') for doc in documents]
-        doc_ids = [str(i) for i in range(len(documents))]
+        all_chunks = []
         
-        # Get embeddings
-        embeddings = self.get_embeddings(contents)
+        for doc_idx, doc in enumerate(documents):
+            # Skip documents without content
+            if not doc.get('content'):
+                continue
+                
+            # Ensure document has an ID
+            doc_id = doc.get('id', f"doc_{doc_idx}")
+            
+            # Add document metadata to each chunk
+            doc_metadata = doc.get('metadata', {})
+            if 'title' in doc:
+                doc_metadata['title'] = doc['title']
+            if 'url' in doc:
+                doc_metadata['url'] = doc['url']
+            
+            # Chunk the document
+            doc_chunks = self.chunker.chunk_document({
+                'content': doc['content'],
+                'id': doc_id,
+                'metadata': doc_metadata
+            })
+            
+            all_chunks.extend(doc_chunks)
         
-        # Create dictionary mapping document IDs to embeddings
-        return {doc_id: embedding for doc_id, embedding in zip(doc_ids, embeddings)}
+        return all_chunks
     
-    def get_chunk_embeddings(self, chunks: List[Dict[str, Any]]) -> Dict[str, np.ndarray]:
-        """Get embeddings for a list of chunks.
+    def chunk_text(self, text: str, metadata: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+        """Chunk a plain text into smaller pieces.
         
         Args:
-            chunks: List of chunk dictionaries with 'content' and 'chunk_id' fields
+            text: Text content
+            metadata: Optional metadata to include with each chunk
             
         Returns:
-            dict: Dictionary mapping chunk IDs to embedding vectors
+            list: List of chunk dictionaries
         """
-        # Extract chunk contents and IDs
-        contents = [chunk.get('content', '') for chunk in chunks]
-        chunk_ids = [f"{i}" for i in range(len(chunks))]
+        return self.chunker.chunk_text(text, metadata)
+    
+    def retrieve_relevant_chunks(self, query: str, chunks: List[Dict[str, Any]], top_k: int = 5) -> List[Dict[str, Any]]:
+        """Retrieve the most relevant chunks for a query.
         
-        # Get embeddings
-        embeddings = self.get_embeddings(contents)
+        Args:
+            query: Query string
+            chunks: List of chunk dictionaries
+            top_k: Number of chunks to retrieve
+            
+        Returns:
+            list: List of the most relevant chunks
+        """
+        if not query or not chunks:
+            return []
+            
+        # Get query embedding
+        query_embedding = self.embedder.get_embedding(query)
         
-        # Create dictionary mapping chunk IDs to embeddings
-        return {chunk_id: embedding for chunk_id, embedding in zip(chunk_ids, embeddings)}
+        # Get chunk embeddings
+        chunk_contents = [chunk.get('content', '') for chunk in chunks]
+        chunk_embeddings = self.embedder.get_embeddings(chunk_contents)
+        
+        # Calculate relevance scores
+        scores = []
+        for i, embedding in enumerate(chunk_embeddings):
+            # Skip empty chunks
+            if np.all(embedding == 0):
+                scores.append(0.0)
+                continue
+                
+            # Calculate cosine similarity
+            similarity = np.dot(query_embedding, embedding) / (
+                np.linalg.norm(query_embedding) * np.linalg.norm(embedding)
+            )
+            scores.append(float(similarity))
+        
+        # Get top-k chunks by score
+        top_indices = np.argsort(scores)[-top_k:][::-1]  # Descending order
+        
+        # Return top chunks with their scores
+        return [
+            {**chunks[i], 'relevance_score': scores[i]}
+            for i in top_indices
+            if scores[i] > 0  # Only include chunks with positive scores
+        ]
+    
+    def rerank_chunks(self, query: str, chunks: List[Dict[str, Any]], top_k: int = 5) -> List[Dict[str, Any]]:
+        """Rerank chunks based on relevance to query.
+        
+        Args:
+            query: Query string
+            chunks: List of chunk dictionaries with 'relevance_score'
+            top_k: Number of chunks to return after reranking
+            
+        Returns:
+            list: List of reranked chunks
+        """
+        # Skip if no chunks or query
+        if not query or not chunks:
+            return []
+            
+        # Rerank chunks
+        reranked_chunks = self.ranker.rerank(query, chunks)
+        
+        # Get top-k reranked chunks
+        return reranked_chunks[:top_k]
+    
+    def chunk_and_retrieve(self, query: str, texts: List[str], top_k: int = 5) -> List[str]:
+        """Chunk texts and retrieve relevant chunks for a query.
+        
+        Args:
+            query: Query string
+            texts: List of text strings
+            top_k: Number of chunks to retrieve
+            
+        Returns:
+            list: List of relevant text chunks
+        """
+        # Skip if no texts or query
+        if not query or not texts:
+            return []
+            
+        # Create documents from texts
+        documents = [{'content': text, 'id': f"doc_{i}"} for i, text in enumerate(texts)]
+        
+        # Chunk documents
+        chunks = self.chunk_documents(documents)
+        
+        # Retrieve relevant chunks
+        relevant_chunks = self.retrieve_relevant_chunks(query, chunks, top_k)
+        
+        # Return the content of relevant chunks
+        return [chunk.get('content', '') for chunk in relevant_chunks]
+    
+    def search(self, query: str, documents: List[Dict[str, Any]], top_k: int = 5) -> List[Dict[str, Any]]:
+        """Search for relevant documents and chunks.
+        
+        Args:
+            query: Query string
+            documents: List of document dictionaries
+            top_k: Number of chunks to retrieve
+            
+        Returns:
+            list: List of relevant document chunks with metadata
+        """
+        # Skip if no documents or query
+        if not query or not documents:
+            return []
+            
+        # Chunk documents
+        chunks = self.chunk_documents(documents)
+        
+        # Retrieve relevant chunks
+        relevant_chunks = self.retrieve_relevant_chunks(query, chunks, top_k * 2)
+        
+        # Rerank chunks to improve quality
+        reranked_chunks = self.rerank_chunks(query, relevant_chunks, top_k)
+        
+        return reranked_chunks
