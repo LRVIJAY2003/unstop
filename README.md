@@ -1,300 +1,246 @@
 """
-Document chunking utilities for the RAG system.
+Text embedding utilities for the RAG system.
 """
 import logging
-import re
-import nltk
-from typing import List, Dict, Any
-
-# Download necessary NLTK data
-try:
-    nltk.download('punkt', quiet=True)
-except:
-    pass
+import os
+import numpy as np
+import pickle
+from typing import List, Dict, Any, Union
 
 logger = logging.getLogger(__name__)
 
-class DocumentChunker:
-    """Class for chunking documents into manageable pieces."""
+class TextEmbedder:
+    """Class for embedding text using various models."""
     
-    def __init__(self, chunk_size=500, chunk_overlap=100):
-        """Initialize the document chunker.
+    def __init__(self, model_name="all-MiniLM-L6-v2", cache_dir="cache"):
+        """Initialize the text embedder.
         
         Args:
-            chunk_size: Target size of chunks (in characters)
-            chunk_overlap: Overlap between chunks (in characters)
+            model_name: Name of the sentence transformer model
+            cache_dir: Directory to cache embeddings
         """
-        self.chunk_size = chunk_size
-        self.chunk_overlap = chunk_overlap
+        self.model_name = model_name
+        self.cache_dir = cache_dir
+        self.model = None
+        
+        # Create cache directory if it doesn't exist
+        os.makedirs(cache_dir, exist_ok=True)
+        
+        # Embedding cache
+        self.embedding_cache = {}
+        self.embedding_cache_file = os.path.join(cache_dir, f"{model_name.replace('/', '_')}_cache.pkl")
+        
+        # Load cache if it exists
+        self._load_cache()
     
-    def chunk_document(self, document: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Chunk a document into smaller pieces.
+    def load_model(self):
+        """Load the sentence transformer model."""
+        if self.model is not None:
+            return
+            
+        try:
+            from sentence_transformers import SentenceTransformer
+            self.model = SentenceTransformer(self.model_name)
+            logger.info(f"Loaded sentence transformer model: {self.model_name}")
+        except ImportError:
+            logger.warning("SentenceTransformer not available, falling back to simpler methods")
+            self.model = None
+    
+    def _load_cache(self):
+        """Load embedding cache from disk."""
+        if os.path.exists(self.embedding_cache_file):
+            try:
+                with open(self.embedding_cache_file, 'rb') as f:
+                    self.embedding_cache = pickle.load(f)
+                logger.info(f"Loaded {len(self.embedding_cache)} cached embeddings")
+            except Exception as e:
+                logger.error(f"Error loading embedding cache: {str(e)}")
+                self.embedding_cache = {}
+    
+    def _save_cache(self):
+        """Save embedding cache to disk."""
+        try:
+            with open(self.embedding_cache_file, 'wb') as f:
+                pickle.dump(self.embedding_cache, f)
+            logger.info(f"Saved {len(self.embedding_cache)} embeddings to cache")
+        except Exception as e:
+            logger.error(f"Error saving embedding cache: {str(e)}")
+    
+    def get_embedding(self, text: str) -> np.ndarray:
+        """Get embedding for a single text.
         
         Args:
-            document: Document as a dictionary with 'content' field
+            text: Text to embed
             
         Returns:
-            list: List of chunk dictionaries
-        """
-        if not document or 'content' not in document:
-            return []
-        
-        content = document['content']
-        
-        # If the content is already small enough, return as a single chunk
-        if len(content) <= self.chunk_size:
-            return [{
-                **document,
-                'chunk_id': 0,
-                'content': content,
-                'chunk_type': 'full_document'
-            }]
-        
-        # First, try to split by section headings
-        heading_pattern = r'(?:\n|^)(#{1,3} .+)(?:\n|$)'
-        headings = list(re.finditer(heading_pattern, content))
-        
-        # If we have headings, use them as chunk boundaries
-        if len(headings) > 1:
-            return self._chunk_by_headings(document, content, headings)
-        
-        # Otherwise, fall back to paragraph chunking
-        return self._chunk_by_paragraphs(document, content)
-    
-    def _chunk_by_headings(self, document: Dict[str, Any], content: str, headings: List[re.Match]) -> List[Dict[str, Any]]:
-        """Chunk content using headings as boundaries.
-        
-        Args:
-            document: Original document
-            content: Document content
-            headings: List of heading regex matches
-            
-        Returns:
-            list: List of chunk dictionaries
-        """
-        chunks = []
-        
-        # Extract title if first heading is at the start of the document
-        title = None
-        if headings[0].start() == 0:
-            title_end = headings[1].start() if len(headings) > 1 else len(content)
-            title = content[:title_end].strip()
-            
-            # Add title as a separate chunk
-            chunks.append({
-                **document,
-                'chunk_id': 0,
-                'content': title,
-                'chunk_type': 'title'
-            })
-        
-        # Process remaining content by heading
-        for i in range(len(headings)):
-            start = headings[i].start()
-            end = headings[i+1].start() if i < len(headings) - 1 else len(content)
-            
-            section = content[start:end].strip()
-            
-            # Skip if this is the title we already added
-            if section == title:
-                continue
-            
-            # If section is too large, subdivide further
-            if len(section) > self.chunk_size:
-                paragraphs = re.split(r'\n\n+', section)
-                current_chunk = []
-                current_size = 0
-                
-                for para in paragraphs:
-                    if current_size + len(para) > self.chunk_size and current_chunk:
-                        # Save current chunk
-                        combined = '\n\n'.join(current_chunk)
-                        chunks.append({
-                            **document,
-                            'chunk_id': len(chunks),
-                            'content': combined,
-                            'chunk_type': 'section_part'
-                        })
-                        
-                        # Start new chunk with overlap
-                        overlap_point = max(0, len(current_chunk) - 1)
-                        current_chunk = current_chunk[overlap_point:]
-                        current_size = sum(len(p) for p in current_chunk)
-                    
-                    current_chunk.append(para)
-                    current_size += len(para)
-                
-                # Add the last chunk if it exists
-                if current_chunk:
-                    combined = '\n\n'.join(current_chunk)
-                    chunks.append({
-                        **document,
-                        'chunk_id': len(chunks),
-                        'content': combined,
-                        'chunk_type': 'section_part'
-                    })
-            else:
-                # Add section as a single chunk
-                chunks.append({
-                    **document,
-                    'chunk_id': len(chunks),
-                    'content': section,
-                    'chunk_type': 'section'
-                })
-        
-        return chunks
-    
-    def _chunk_by_paragraphs(self, document: Dict[str, Any], content: str) -> List[Dict[str, Any]]:
-        """Chunk content by paragraphs.
-        
-        Args:
-            document: Original document
-            content: Document content
-            
-        Returns:
-            list: List of chunk dictionaries
-        """
-        chunks = []
-        paragraphs = re.split(r'\n\n+', content)
-        
-        current_chunk = []
-        current_size = 0
-        
-        for para in paragraphs:
-            # If adding this paragraph would exceed chunk size, save current chunk and start a new one
-            if current_size + len(para) > self.chunk_size and current_chunk:
-                combined = '\n\n'.join(current_chunk)
-                chunks.append({
-                    **document,
-                    'chunk_id': len(chunks),
-                    'content': combined,
-                    'chunk_type': 'paragraph_group'
-                })
-                
-                # Start new chunk with overlap
-                overlap_point = max(0, len(current_chunk) - 2)  # Include up to 2 paragraphs overlap
-                current_chunk = current_chunk[overlap_point:]
-                current_size = sum(len(p) for p in current_chunk)
-            
-            # Add paragraph to current chunk
-            current_chunk.append(para)
-            current_size += len(para)
-        
-        # Add the last chunk if it exists
-        if current_chunk:
-            combined = '\n\n'.join(current_chunk)
-            chunks.append({
-                **document,
-                'chunk_id': len(chunks),
-                'content': combined,
-                'chunk_type': 'paragraph_group'
-            })
-        
-        return chunks
-    
-    def chunk_text(self, text: str, metadata: Dict[str, Any] = None) -> List[Dict[str, Any]]:
-        """Chunk a plain text into smaller pieces.
-        
-        Args:
-            text: Text content
-            metadata: Optional metadata to include with each chunk
-            
-        Returns:
-            list: List of chunk dictionaries
-        """
-        document = {
-            'content': text,
-            'metadata': metadata or {}
-        }
-        
-        return self.chunk_document(document)
-    
-    def chunk_by_sentences(self, text: str, metadata: Dict[str, Any] = None) -> List[Dict[str, Any]]:
-        """Chunk text by sentences, respecting chunk size.
-        
-        Args:
-            text: Text content
-            metadata: Optional metadata to include with each chunk
-            
-        Returns:
-            list: List of chunk dictionaries
+            np.ndarray: Embedding vector
         """
         if not text:
-            return []
+            # Return zero vector for empty text
+            return np.zeros(384)  # Default size for most models
             
-        # Get all sentences
-        sentences = nltk.sent_tokenize(text)
+        # Check cache
+        if text in self.embedding_cache:
+            return self.embedding_cache[text]
+            
+        # Load model if not already loaded
+        self.load_model()
         
-        chunks = []
-        current_chunk = []
-        current_size = 0
+        if self.model:
+            # Generate embedding using sentence transformer
+            embedding = self.model.encode(text, convert_to_numpy=True)
+        else:
+            # Fall back to simpler method if model is not available
+            embedding = self._simple_embedding(text)
+            
+        # Cache the embedding
+        self.embedding_cache[text] = embedding
         
-        for sentence in sentences:
-            sentence_size = len(sentence)
+        # Save cache periodically (every 100 new embeddings)
+        if len(self.embedding_cache) % 100 == 0:
+            self._save_cache()
             
-            # Handle very large sentences
-            if sentence_size > self.chunk_size:
-                # If we have content in the current chunk, add it first
-                if current_chunk:
-                    chunks.append({
-                        'content': ' '.join(current_chunk),
-                        'chunk_id': len(chunks),
-                        'chunk_type': 'sentence_group',
-                        'metadata': metadata or {}
-                    })
-                    current_chunk = []
-                    current_size = 0
-                
-                # Split the long sentence
-                words = sentence.split()
-                current_sentence_chunk = []
-                current_sentence_size = 0
-                
-                for word in words:
-                    if current_sentence_size + len(word) + 1 > self.chunk_size and current_sentence_chunk:
-                        chunks.append({
-                            'content': ' '.join(current_sentence_chunk),
-                            'chunk_id': len(chunks),
-                            'chunk_type': 'sentence_part',
-                            'metadata': metadata or {}
-                        })
-                        current_sentence_chunk = []
-                        current_sentence_size = 0
-                    
-                    current_sentence_chunk.append(word)
-                    current_sentence_size += len(word) + 1  # Include space
-                
-                # Add any remaining words
-                if current_sentence_chunk:
-                    chunks.append({
-                        'content': ' '.join(current_sentence_chunk),
-                        'chunk_id': len(chunks),
-                        'chunk_type': 'sentence_part',
-                        'metadata': metadata or {}
-                    })
+        return embedding
+    
+    def get_embeddings(self, texts: List[str]) -> List[np.ndarray]:
+        """Get embeddings for multiple texts.
+        
+        Args:
+            texts: List of texts to embed
             
-            # For normal sentences, add to current chunk
-            elif current_size + sentence_size > self.chunk_size and current_chunk:
-                # Save current chunk and start a new one
-                chunks.append({
-                    'content': ' '.join(current_chunk),
-                    'chunk_id': len(chunks),
-                    'chunk_type': 'sentence_group',
-                    'metadata': metadata or {}
-                })
-                current_chunk = [sentence]
-                current_size = sentence_size
+        Returns:
+            list: List of embedding vectors
+        """
+        # Filter out empty texts
+        non_empty_texts = [(i, text) for i, text in enumerate(texts) if text]
+        indices, valid_texts = zip(*non_empty_texts) if non_empty_texts else ([], [])
+        
+        # Check cache for each text
+        embeddings = [None] * len(texts)
+        texts_to_embed = []
+        texts_indices = []
+        
+        for i, text in zip(indices, valid_texts):
+            if text in self.embedding_cache:
+                embeddings[i] = self.embedding_cache[text]
             else:
-                current_chunk.append(sentence)
-                current_size += sentence_size
+                texts_to_embed.append(text)
+                texts_indices.append(i)
         
-        # Add the last chunk if it exists
-        if current_chunk:
-            chunks.append({
-                'content': ' '.join(current_chunk),
-                'chunk_id': len(chunks),
-                'chunk_type': 'sentence_group',
-                'metadata': metadata or {}
-            })
+        if texts_to_embed:
+            # Load model if not already loaded
+            self.load_model()
+            
+            if self.model:
+                # Generate embeddings using sentence transformer
+                batch_embeddings = self.model.encode(texts_to_embed, convert_to_numpy=True)
+            else:
+                # Fall back to simpler method
+                batch_embeddings = [self._simple_embedding(text) for text in texts_to_embed]
+                
+            # Update embeddings and cache
+            for i, embedding in zip(texts_indices, batch_embeddings):
+                embeddings[i] = embedding
+                self.embedding_cache[texts[i]] = embedding
+                
+            # Save cache if we've added several new embeddings
+            if len(texts_to_embed) > 10:
+                self._save_cache()
         
-        return chunks
+        # Fill in empty slots with zero vectors
+        default_dim = 384  # Default size
+        if any(embeddings):
+            default_dim = embeddings[indices[0]].shape[0] if indices else default_dim
+            
+        for i in range(len(embeddings)):
+            if embeddings[i] is None:
+                embeddings[i] = np.zeros(default_dim)
+                
+        return embeddings
+    
+    def _simple_embedding(self, text: str) -> np.ndarray:
+        """Simple fallback embedding method.
+        
+        Args:
+            text: Text to embed
+            
+        Returns:
+            np.ndarray: Embedding vector
+        """
+        try:
+            from sklearn.feature_extraction.text import TfidfVectorizer
+            
+            # Create a small corpus with just this text
+            corpus = [text]
+            vectorizer = TfidfVectorizer(max_features=384)
+            tfidf_matrix = vectorizer.fit_transform(corpus)
+            
+            # Convert to dense and resize to standard dimensions
+            embedding = tfidf_matrix.toarray()[0]
+            
+            # Pad or truncate to get standard size
+            if len(embedding) < 384:
+                embedding = np.pad(embedding, (0, 384 - len(embedding)))
+            elif len(embedding) > 384:
+                embedding = embedding[:384]
+                
+            return embedding
+            
+        except ImportError:
+            # If sklearn is not available, use an even simpler approach
+            logger.warning("TfidfVectorizer not available, using very simple embedding")
+            
+            # Create a simple bag-of-words vector
+            words = set(text.lower().split())
+            # Simple hash-based embedding
+            embedding = np.zeros(384)
+            
+            for word in words:
+                # Simple hash function to distribute words
+                hash_val = hash(word) % 384
+                embedding[hash_val] += 1
+                
+            # Normalize
+            norm = np.linalg.norm(embedding)
+            if norm > 0:
+                embedding = embedding / norm
+                
+            return embedding
+    
+    def get_document_embeddings(self, documents: List[Dict[str, Any]]) -> Dict[str, np.ndarray]:
+        """Get embeddings for a list of documents.
+        
+        Args:
+            documents: List of document dictionaries with 'content' field
+            
+        Returns:
+            dict: Dictionary mapping document IDs to embedding vectors
+        """
+        # Extract document contents and IDs
+        contents = [doc.get('content', '') for doc in documents]
+        doc_ids = [str(i) for i in range(len(documents))]
+        
+        # Get embeddings
+        embeddings = self.get_embeddings(contents)
+        
+        # Create dictionary mapping document IDs to embeddings
+        return {doc_id: embedding for doc_id, embedding in zip(doc_ids, embeddings)}
+    
+    def get_chunk_embeddings(self, chunks: List[Dict[str, Any]]) -> Dict[str, np.ndarray]:
+        """Get embeddings for a list of chunks.
+        
+        Args:
+            chunks: List of chunk dictionaries with 'content' and 'chunk_id' fields
+            
+        Returns:
+            dict: Dictionary mapping chunk IDs to embedding vectors
+        """
+        # Extract chunk contents and IDs
+        contents = [chunk.get('content', '') for chunk in chunks]
+        chunk_ids = [f"{i}" for i in range(len(chunks))]
+        
+        # Get embeddings
+        embeddings = self.get_embeddings(contents)
+        
+        # Create dictionary mapping chunk IDs to embeddings
+        return {chunk_id: embedding for chunk_id, embedding in zip(chunk_ids, embeddings)}
