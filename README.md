@@ -1,36 +1,27 @@
+# Flask configuration
+FLASK_APP=app.py
+FLASK_ENV=development
+SECRET_KEY=your-secret-key-replace-this
 
-# Core dependencies
-flask==2.0.2
-python-dotenv==0.19.2
-gunicorn==20.1.0
-flask-cors==3.0.10
+# Confluence settings
+CONFLUENCE_URL=https://your-domain.atlassian.net
+CONFLUENCE_SPACE_ID=your-space-id
+CONFLUENCE_USER_ID=your-email@company.com
+CONFLUENCE_API_TOKEN=your-api-token
 
-# Confluence integration
-atlassian-python-api==3.32.2
+# Remedy settings
+REMEDY_SERVER=cmegroup-restapi.onbmc.com
+REMEDY_API_BASE=https://cmegroup-restapi.onbmc.com
+REMEDY_USERNAME=your-username
+REMEDY_PASSWORD=your-password
 
-# Remedy integration
-requests==2.28.1
-pyodbc==4.0.34  # For SQL Server connection if needed
+# Google AI settings - not needed when using direct integration
+# GOOGLE_API_KEY=your-google-api-key
 
-# RAG system
-sentence-transformers==2.2.2
-rank-bm25==0.2.2
-nltk==3.7
-beautifulsoup4==4.11.1
-lxml==4.9.1
-html2text==2020.1.16
-faiss-cpu==1.7.2  # Or faiss-gpu if GPU is available
+# Project settings
+PROJECT_ID=prj-dv-cpe-4363
+REGION=us-central1
+MODEL_NAME=gemini-1.0-flash-001
 
-# Data processing
-numpy==1.24.1
-pandas==1.5.2
-scikit-learn==1.2.0
-
-# Google AI
-google-generativeai==0.3.1
-pydantic==1.10.4
-
-# Utilities
-python-dateutil==2.8.2
-tqdm==4.64.1
-cachetools==5.2.0
+# Logging
+LOG_LEVEL=INFO
