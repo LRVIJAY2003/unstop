@@ -1,10 +1,10 @@
 """
-Parser for Remedy ticket data.
+Document chunking utilities for the RAG system.
 """
 import logging
 import re
 import nltk
-from datetime import datetime
+from typing import List, Dict, Any
 
 # Download necessary NLTK data
 try:
@@ -14,174 +14,287 @@ except:
 
 logger = logging.getLogger(__name__)
 
-def parse_ticket_description(description):
-    """Parse ticket description to extract structured information.
+class DocumentChunker:
+    """Class for chunking documents into manageable pieces."""
     
-    Args:
-        description: Ticket description text
+    def __init__(self, chunk_size=500, chunk_overlap=100):
+        """Initialize the document chunker.
         
-    Returns:
-        dict: Dictionary with parsed information
-    """
-    if not description:
-        return {"text": "", "sections": {}}
+        Args:
+            chunk_size: Target size of chunks (in characters)
+            chunk_overlap: Overlap between chunks (in characters)
+        """
+        self.chunk_size = chunk_size
+        self.chunk_overlap = chunk_overlap
     
-    # Split description into sentences
-    sentences = nltk.sent_tokenize(description)
-    
-    # Extract key sections using regex patterns
-    problem_section = extract_section(description, ["problem:", "issue:", "error:"])
-    action_section = extract_section(description, ["action taken:", "steps taken:", "troubleshooting:"])
-    resolution_section = extract_section(description, ["resolution:", "solution:", "workaround:"])
-    
-    # Extract error codes if present
-    error_codes = extract_error_codes(description)
-    
-    # Process timestamps
-    timestamps = extract_timestamps(description)
-    
-    return {
-        "text": description,
-        "sentences": sentences,
-        "sections": {
-            "problem": problem_section,
-            "action": action_section,
-            "resolution": resolution_section
-        },
-        "error_codes": error_codes,
-        "timestamps": timestamps
-    }
-
-def extract_section(text, section_markers):
-    """Extract a section from text using markers.
-    
-    Args:
-        text: The text to extract from
-        section_markers: List of possible section marker strings
+    def chunk_document(self, document: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Chunk a document into smaller pieces.
         
-    Returns:
-        str: Extracted section text
-    """
-    for marker in section_markers:
-        pattern = re.compile(rf"{marker}\s*(.*?)(?=\n\n|\n[A-Za-z]+:|\Z)", re.IGNORECASE | re.DOTALL)
-        match = pattern.search(text)
-        if match:
-            return match.group(1).strip()
-    
-    return ""
-
-def extract_error_codes(text):
-    """Extract error codes from text.
-    
-    Args:
-        text: Text to extract from
+        Args:
+            document: Document as a dictionary with 'content' field
+            
+        Returns:
+            list: List of chunk dictionaries
+        """
+        if not document or 'content' not in document:
+            return []
         
-    Returns:
-        list: List of error codes
-    """
-    # Common error code patterns
-    patterns = [
-        r"error\s+code[s]?[\s:]*([\w\d-]+)",  # Error code: ABC123
-        r"error[\s:]*([\w\d-]{3,})",          # Error: ABC123
-        r"exception[\s:]*([\w\d.-]{3,})",     # Exception: System.NullReference
-        r"status code[\s:]*([\d]{3})",        # Status code: 404
-        r"\b([A-Z]{2,}-\d{3,})\b"             # ISSUE-1234 format
-    ]
-    
-    error_codes = []
-    
-    for pattern in patterns:
-        matches = re.finditer(pattern, text, re.IGNORECASE)
-        for match in matches:
-            error_codes.append(match.group(1))
-    
-    return error_codes
-
-def extract_timestamps(text):
-    """Extract timestamps from text.
-    
-    Args:
-        text: Text to extract from
+        content = document['content']
         
-    Returns:
-        list: List of timestamp strings
-    """
-    # Common timestamp patterns
-    patterns = [
-        r"\d{1,2}/\d{1,2}/\d{2,4}\s+\d{1,2}:\d{2}:\d{2}",  # MM/DD/YYYY HH:MM:SS
-        r"\d{1,2}-\d{1,2}-\d{2,4}\s+\d{1,2}:\d{2}:\d{2}",  # MM-DD-YYYY HH:MM:SS
-        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}",           # ISO format
-        r"\d{1,2}/\d{1,2}/\d{2,4}",                       # MM/DD/YYYY
-        r"\d{1,2}-\d{1,2}-\d{2,4}"                        # MM-DD-YYYY
-    ]
-    
-    timestamps = []
-    
-    for pattern in patterns:
-        matches = re.finditer(pattern, text)
-        for match in matches:
-            timestamps.append(match.group(0))
-    
-    return timestamps
-
-def format_ticket_for_display(ticket):
-    """Format ticket data for display.
-    
-    Args:
-        ticket: Ticket data dictionary
+        # If the content is already small enough, return as a single chunk
+        if len(content) <= self.chunk_size:
+            return [{
+                **document,
+                'chunk_id': 0,
+                'content': content,
+                'chunk_type': 'full_document'
+            }]
         
-    Returns:
-        str: Formatted ticket text
-    """
-    if not ticket:
-        return ""
+        # First, try to split by section headings
+        heading_pattern = r'(?:\n|^)(#{1,3} .+)(?:\n|$)'
+        headings = list(re.finditer(heading_pattern, content))
+        
+        # If we have headings, use them as chunk boundaries
+        if len(headings) > 1:
+            return self._chunk_by_headings(document, content, headings)
+        
+        # Otherwise, fall back to paragraph chunking
+        return self._chunk_by_paragraphs(document, content)
     
-    # Parse the description
-    parsed_description = parse_ticket_description(ticket.get('description', ''))
+    def _chunk_by_headings(self, document: Dict[str, Any], content: str, headings: List[re.Match]) -> List[Dict[str, Any]]:
+        """Chunk content using headings as boundaries.
+        
+        Args:
+            document: Original document
+            content: Document content
+            headings: List of heading regex matches
+            
+        Returns:
+            list: List of chunk dictionaries
+        """
+        chunks = []
+        
+        # Extract title if first heading is at the start of the document
+        title = None
+        if headings[0].start() == 0:
+            title_end = headings[1].start() if len(headings) > 1 else len(content)
+            title = content[:title_end].strip()
+            
+            # Add title as a separate chunk
+            chunks.append({
+                **document,
+                'chunk_id': 0,
+                'content': title,
+                'chunk_type': 'title'
+            })
+        
+        # Process remaining content by heading
+        for i in range(len(headings)):
+            start = headings[i].start()
+            end = headings[i+1].start() if i < len(headings) - 1 else len(content)
+            
+            section = content[start:end].strip()
+            
+            # Skip if this is the title we already added
+            if section == title:
+                continue
+            
+            # If section is too large, subdivide further
+            if len(section) > self.chunk_size:
+                paragraphs = re.split(r'\n\n+', section)
+                current_chunk = []
+                current_size = 0
+                
+                for para in paragraphs:
+                    if current_size + len(para) > self.chunk_size and current_chunk:
+                        # Save current chunk
+                        combined = '\n\n'.join(current_chunk)
+                        chunks.append({
+                            **document,
+                            'chunk_id': len(chunks),
+                            'content': combined,
+                            'chunk_type': 'section_part'
+                        })
+                        
+                        # Start new chunk with overlap
+                        overlap_point = max(0, len(current_chunk) - 1)
+                        current_chunk = current_chunk[overlap_point:]
+                        current_size = sum(len(p) for p in current_chunk)
+                    
+                    current_chunk.append(para)
+                    current_size += len(para)
+                
+                # Add the last chunk if it exists
+                if current_chunk:
+                    combined = '\n\n'.join(current_chunk)
+                    chunks.append({
+                        **document,
+                        'chunk_id': len(chunks),
+                        'content': combined,
+                        'chunk_type': 'section_part'
+                    })
+            else:
+                # Add section as a single chunk
+                chunks.append({
+                    **document,
+                    'chunk_id': len(chunks),
+                    'content': section,
+                    'chunk_type': 'section'
+                })
+        
+        return chunks
     
-    # Format the ticket
-    sections = []
+    def _chunk_by_paragraphs(self, document: Dict[str, Any], content: str) -> List[Dict[str, Any]]:
+        """Chunk content by paragraphs.
+        
+        Args:
+            document: Original document
+            content: Document content
+            
+        Returns:
+            list: List of chunk dictionaries
+        """
+        chunks = []
+        paragraphs = re.split(r'\n\n+', content)
+        
+        current_chunk = []
+        current_size = 0
+        
+        for para in paragraphs:
+            # If adding this paragraph would exceed chunk size, save current chunk and start a new one
+            if current_size + len(para) > self.chunk_size and current_chunk:
+                combined = '\n\n'.join(current_chunk)
+                chunks.append({
+                    **document,
+                    'chunk_id': len(chunks),
+                    'content': combined,
+                    'chunk_type': 'paragraph_group'
+                })
+                
+                # Start new chunk with overlap
+                overlap_point = max(0, len(current_chunk) - 2)  # Include up to 2 paragraphs overlap
+                current_chunk = current_chunk[overlap_point:]
+                current_size = sum(len(p) for p in current_chunk)
+            
+            # Add paragraph to current chunk
+            current_chunk.append(para)
+            current_size += len(para)
+        
+        # Add the last chunk if it exists
+        if current_chunk:
+            combined = '\n\n'.join(current_chunk)
+            chunks.append({
+                **document,
+                'chunk_id': len(chunks),
+                'content': combined,
+                'chunk_type': 'paragraph_group'
+            })
+        
+        return chunks
     
-    # Ticket header
-    sections.append(f"Ticket ID: {ticket.get('id', 'N/A')}")
-    sections.append(f"Status: {ticket.get('status', 'N/A')}")
+    def chunk_text(self, text: str, metadata: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+        """Chunk a plain text into smaller pieces.
+        
+        Args:
+            text: Text content
+            metadata: Optional metadata to include with each chunk
+            
+        Returns:
+            list: List of chunk dictionaries
+        """
+        document = {
+            'content': text,
+            'metadata': metadata or {}
+        }
+        
+        return self.chunk_document(document)
     
-    # Add submitter and assignee
-    if ticket.get('submitter'):
-        sections.append(f"Submitted by: {ticket.get('submitter')}")
-    if ticket.get('assignee'):
-        sections.append(f"Assigned to: {ticket.get('assignee')}")
-    
-    # Add priority and impact if available
-    if ticket.get('priority') or ticket.get('impact'):
-        priority_impact = []
-        if ticket.get('priority'):
-            priority_impact.append(f"Priority: {ticket.get('priority')}")
-        if ticket.get('impact'):
-            priority_impact.append(f"Impact: {ticket.get('impact')}")
-        sections.append(" | ".join(priority_impact))
-    
-    # Add problem description
-    if parsed_description['sections']['problem']:
-        sections.append("\nProblem:")
-        sections.append(parsed_description['sections']['problem'])
-    elif parsed_description['text']:
-        sections.append("\nDescription:")
-        sections.append(parsed_description['text'][:500] + ('...' if len(parsed_description['text']) > 500 else ''))
-    
-    # Add action taken if available
-    if parsed_description['sections']['action']:
-        sections.append("\nAction Taken:")
-        sections.append(parsed_description['sections']['action'])
-    
-    # Add resolution if available
-    if parsed_description['sections']['resolution']:
-        sections.append("\nResolution:")
-        sections.append(parsed_description['sections']['resolution'])
-    
-    # Add error codes if found
-    if parsed_description['error_codes']:
-        sections.append("\nError Codes:")
-        sections.append(", ".join(parsed_description['error_codes']))
-    
-    return "\n".join(sections)
+    def chunk_by_sentences(self, text: str, metadata: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+        """Chunk text by sentences, respecting chunk size.
+        
+        Args:
+            text: Text content
+            metadata: Optional metadata to include with each chunk
+            
+        Returns:
+            list: List of chunk dictionaries
+        """
+        if not text:
+            return []
+            
+        # Get all sentences
+        sentences = nltk.sent_tokenize(text)
+        
+        chunks = []
+        current_chunk = []
+        current_size = 0
+        
+        for sentence in sentences:
+            sentence_size = len(sentence)
+            
+            # Handle very large sentences
+            if sentence_size > self.chunk_size:
+                # If we have content in the current chunk, add it first
+                if current_chunk:
+                    chunks.append({
+                        'content': ' '.join(current_chunk),
+                        'chunk_id': len(chunks),
+                        'chunk_type': 'sentence_group',
+                        'metadata': metadata or {}
+                    })
+                    current_chunk = []
+                    current_size = 0
+                
+                # Split the long sentence
+                words = sentence.split()
+                current_sentence_chunk = []
+                current_sentence_size = 0
+                
+                for word in words:
+                    if current_sentence_size + len(word) + 1 > self.chunk_size and current_sentence_chunk:
+                        chunks.append({
+                            'content': ' '.join(current_sentence_chunk),
+                            'chunk_id': len(chunks),
+                            'chunk_type': 'sentence_part',
+                            'metadata': metadata or {}
+                        })
+                        current_sentence_chunk = []
+                        current_sentence_size = 0
+                    
+                    current_sentence_chunk.append(word)
+                    current_sentence_size += len(word) + 1  # Include space
+                
+                # Add any remaining words
+                if current_sentence_chunk:
+                    chunks.append({
+                        'content': ' '.join(current_sentence_chunk),
+                        'chunk_id': len(chunks),
+                        'chunk_type': 'sentence_part',
+                        'metadata': metadata or {}
+                    })
+            
+            # For normal sentences, add to current chunk
+            elif current_size + sentence_size > self.chunk_size and current_chunk:
+                # Save current chunk and start a new one
+                chunks.append({
+                    'content': ' '.join(current_chunk),
+                    'chunk_id': len(chunks),
+                    'chunk_type': 'sentence_group',
+                    'metadata': metadata or {}
+                })
+                current_chunk = [sentence]
+                current_size = sentence_size
+            else:
+                current_chunk.append(sentence)
+                current_size += sentence_size
+        
+        # Add the last chunk if it exists
+        if current_chunk:
+            chunks.append({
+                'content': ' '.join(current_chunk),
+                'chunk_id': len(chunks),
+                'chunk_type': 'sentence_group',
+                'metadata': metadata or {}
+            })
+        
+        return chunks
