@@ -1,266 +1,187 @@
 """
-Client for interacting with BMC Remedy.
+Parser for Remedy ticket data.
 """
 import logging
-import json
-import requests
-from requests.auth import HTTPBasicAuth
+import re
+import nltk
+from datetime import datetime
 
-from src.utils.cache import cache_result
+# Download necessary NLTK data
+try:
+    nltk.download('punkt', quiet=True)
+except:
+    pass
 
 logger = logging.getLogger(__name__)
 
-class RemedyClient:
-    """Client for interacting with Remedy API."""
+def parse_ticket_description(description):
+    """Parse ticket description to extract structured information.
     
-    def __init__(self, server, api_base, username, password):
-        """Initialize the Remedy client.
+    Args:
+        description: Ticket description text
         
-        Args:
-            server: Remedy server hostname
-            api_base: Base URL for Remedy API
-            username: Remedy username
-            password: Remedy password
-        """
-        self.server = server
-        self.api_base = api_base
-        self.username = username
-        self.password = password
-        
-        # API endpoints
-        self.login_url = f"{api_base}/api/jwt/login"
-        self.logout_url = f"{api_base}/api/jwt/logout"
-        self.ticket_url = f"{api_base}/api/arsys/v1/entry/HPD:Help"
-        
-        # Authentication token
-        self.token = None
-        self.logged_in = False
+    Returns:
+        dict: Dictionary with parsed information
+    """
+    if not description:
+        return {"text": "", "sections": {}}
     
-    def _do_login(self):
-        """Login to Remedy API and get authentication token."""
-        if self.logged_in:
-            return True
-            
-        try:
-            # Prepare login payload
-            payload = {
-                'username': self.username,
-                'password': self.password
-            }
-            
-            # Set request headers
-            headers = {
-                'Content-Type': 'application/x-www-form-urlencoded'
-            }
-            
-            # Make login request
-            response = requests.post(
-                self.login_url,
-                data=payload,
-                headers=headers,
-                verify=False  # TODO: Enable verification with proper certificates
-            )
-            
-            # Check if login was successful
-            if response.status_code == 200:
-                self.token = response.text
-                self.logged_in = True
-                logger.info("Successfully logged in to Remedy API")
-                return True
-            else:
-                logger.error(f"Failed to login to Remedy: {response.status_code} - {response.text}")
-                return False
-                
-        except Exception as e:
-            logger.error(f"Error logging in to Remedy: {str(e)}")
-            return False
+    # Split description into sentences
+    sentences = nltk.sent_tokenize(description)
     
-    def _logout(self):
-        """Logout from Remedy API."""
-        if not self.logged_in or not self.token:
-            return True
-            
-        try:
-            # Set request headers
-            headers = {
-                'Authorization': f"AR-JWT {self.token}"
-            }
-            
-            # Make logout request
-            response = requests.post(
-                self.logout_url,
-                headers=headers,
-                verify=False  # TODO: Enable verification with proper certificates
-            )
-            
-            # Check if logout was successful
-            if response.status_code == 204:
-                self.token = None
-                self.logged_in = False
-                logger.info("Successfully logged out from Remedy API")
-                return True
-            else:
-                logger.error(f"Failed to logout from Remedy: {response.status_code} - {response.text}")
-                return False
-                
-        except Exception as e:
-            logger.error(f"Error logging out from Remedy: {str(e)}")
-            return False
+    # Extract key sections using regex patterns
+    problem_section = extract_section(description, ["problem:", "issue:", "error:"])
+    action_section = extract_section(description, ["action taken:", "steps taken:", "troubleshooting:"])
+    resolution_section = extract_section(description, ["resolution:", "solution:", "workaround:"])
     
-    def check_connection(self):
-        """Check if the connection to Remedy is working.
+    # Extract error codes if present
+    error_codes = extract_error_codes(description)
+    
+    # Process timestamps
+    timestamps = extract_timestamps(description)
+    
+    return {
+        "text": description,
+        "sentences": sentences,
+        "sections": {
+            "problem": problem_section,
+            "action": action_section,
+            "resolution": resolution_section
+        },
+        "error_codes": error_codes,
+        "timestamps": timestamps
+    }
+
+def extract_section(text, section_markers):
+    """Extract a section from text using markers.
+    
+    Args:
+        text: The text to extract from
+        section_markers: List of possible section marker strings
         
-        Returns:
-            bool: True if connection is successful, False otherwise
-        """
-        try:
-            return self._do_login() and self._logout()
-        except Exception as e:
-            logger.error(f"Failed to connect to Remedy: {str(e)}")
-            return False
+    Returns:
+        str: Extracted section text
+    """
+    for marker in section_markers:
+        pattern = re.compile(rf"{marker}\s*(.*?)(?=\n\n|\n[A-Za-z]+:|\Z)", re.IGNORECASE | re.DOTALL)
+        match = pattern.search(text)
+        if match:
+            return match.group(1).strip()
     
-    @cache_result(ttl=300)  # Cache for 5 minutes
-    def search_tickets(self, query, limit=10):
-        """Search for tickets in Remedy.
-        
-        Args:
-            query: Search query
-            limit: Maximum number of results to return
-            
-        Returns:
-            list: List of dictionaries containing ticket information
-        """
-        try:
-            # Login to get token
-            if not self._do_login():
-                logger.error("Failed to login to Remedy")
-                return []
-                
-            # Create authentication headers
-            headers = {
-                'Authorization': f"AR-JWT {self.token}",
-                'Content-Type': 'application/json'
-            }
-            
-            # Create query parameters
-            # Using a simple query to get tickets with terms in Status or Description
-            query_params = {
-                'q': f"'Description' LIKE \"%{query}%\"",
-                'limit': limit,
-                'fields': 'values(ID, Status, Description, Submitter, "Request Assignee", "Impact", Priority)'
-            }
-            
-            # Make search request
-            response = requests.get(
-                self.ticket_url,
-                headers=headers,
-                params=query_params,
-                verify=False  # TODO: Enable verification with proper certificates
-            )
-            
-            # Check if search was successful
-            if response.status_code == 200:
-                data = response.json()
-                entries = data.get('entries', [])
-                
-                # Format ticket data
-                tickets = []
-                for entry in entries:
-                    values = entry.get('values', {})
-                    tickets.append({
-                        'id': values.get('ID', ''),
-                        'status': values.get('Status', ''),
-                        'description': values.get('Description', ''),
-                        'submitter': values.get('Submitter', ''),
-                        'assignee': values.get('Request Assignee', ''),
-                        'impact': values.get('Impact', ''),
-                        'priority': values.get('Priority', '')
-                    })
-                
-                # Logout to clean up
-                self._logout()
-                
-                return tickets
-            else:
-                logger.error(f"Failed to search Remedy tickets: {response.status_code} - {response.text}")
-                # Logout to clean up
-                self._logout()
-                return []
-                
-        except Exception as e:
-            logger.error(f"Error searching Remedy tickets: {str(e)}")
-            # Try to logout anyway
-            try:
-                self._logout()
-            except:
-                pass
-            return []
+    return ""
+
+def extract_error_codes(text):
+    """Extract error codes from text.
     
-    def get_ticket_details(self, ticket_id):
-        """Get detailed information for a specific ticket.
+    Args:
+        text: Text to extract from
         
-        Args:
-            ticket_id: Ticket ID
-            
-        Returns:
-            dict: Dictionary containing ticket details
-        """
-        try:
-            # Login to get token
-            if not self._do_login():
-                logger.error("Failed to login to Remedy")
-                return {}
-                
-            # Create authentication headers
-            headers = {
-                'Authorization': f"AR-JWT {self.token}",
-                'Content-Type': 'application/json'
-            }
-            
-            # Make request to get ticket details
-            response = requests.get(
-                f"{self.ticket_url}/{ticket_id}",
-                headers=headers,
-                verify=False  # TODO: Enable verification with proper certificates
-            )
-            
-            # Check if request was successful
-            if response.status_code == 200:
-                data = response.json()
-                values = data.get('values', {})
-                
-                # Format ticket details
-                ticket_details = {
-                    'id': values.get('Incident Number', ''),
-                    'status': values.get('Status', ''),
-                    'description': values.get('Description', ''),
-                    'submitter': values.get('Submitter', ''),
-                    'assignee': values.get('Assignee', ''),
-                    'assignee_group': values.get('Assignee Group', ''),
-                    'impact': values.get('Impact', ''),
-                    'priority': values.get('Priority', ''),
-                    'urgency': values.get('Urgency', ''),
-                    'reported_source': values.get('Reported Source', ''),
-                    'last_modified': values.get('Last Modified Date', ''),
-                    'create_date': values.get('Create Date', ''),
-                    'resolution': values.get('Resolution', '')
-                }
-                
-                # Logout to clean up
-                self._logout()
-                
-                return ticket_details
-            else:
-                logger.error(f"Failed to get ticket details: {response.status_code} - {response.text}")
-                # Logout to clean up
-                self._logout()
-                return {}
-                
-        except Exception as e:
-            logger.error(f"Error getting ticket details: {str(e)}")
-            # Try to logout anyway
-            try:
-                self._logout()
-            except:
-                pass
-            return {}
+    Returns:
+        list: List of error codes
+    """
+    # Common error code patterns
+    patterns = [
+        r"error\s+code[s]?[\s:]*([\w\d-]+)",  # Error code: ABC123
+        r"error[\s:]*([\w\d-]{3,})",          # Error: ABC123
+        r"exception[\s:]*([\w\d.-]{3,})",     # Exception: System.NullReference
+        r"status code[\s:]*([\d]{3})",        # Status code: 404
+        r"\b([A-Z]{2,}-\d{3,})\b"             # ISSUE-1234 format
+    ]
+    
+    error_codes = []
+    
+    for pattern in patterns:
+        matches = re.finditer(pattern, text, re.IGNORECASE)
+        for match in matches:
+            error_codes.append(match.group(1))
+    
+    return error_codes
+
+def extract_timestamps(text):
+    """Extract timestamps from text.
+    
+    Args:
+        text: Text to extract from
+        
+    Returns:
+        list: List of timestamp strings
+    """
+    # Common timestamp patterns
+    patterns = [
+        r"\d{1,2}/\d{1,2}/\d{2,4}\s+\d{1,2}:\d{2}:\d{2}",  # MM/DD/YYYY HH:MM:SS
+        r"\d{1,2}-\d{1,2}-\d{2,4}\s+\d{1,2}:\d{2}:\d{2}",  # MM-DD-YYYY HH:MM:SS
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}",           # ISO format
+        r"\d{1,2}/\d{1,2}/\d{2,4}",                       # MM/DD/YYYY
+        r"\d{1,2}-\d{1,2}-\d{2,4}"                        # MM-DD-YYYY
+    ]
+    
+    timestamps = []
+    
+    for pattern in patterns:
+        matches = re.finditer(pattern, text)
+        for match in matches:
+            timestamps.append(match.group(0))
+    
+    return timestamps
+
+def format_ticket_for_display(ticket):
+    """Format ticket data for display.
+    
+    Args:
+        ticket: Ticket data dictionary
+        
+    Returns:
+        str: Formatted ticket text
+    """
+    if not ticket:
+        return ""
+    
+    # Parse the description
+    parsed_description = parse_ticket_description(ticket.get('description', ''))
+    
+    # Format the ticket
+    sections = []
+    
+    # Ticket header
+    sections.append(f"Ticket ID: {ticket.get('id', 'N/A')}")
+    sections.append(f"Status: {ticket.get('status', 'N/A')}")
+    
+    # Add submitter and assignee
+    if ticket.get('submitter'):
+        sections.append(f"Submitted by: {ticket.get('submitter')}")
+    if ticket.get('assignee'):
+        sections.append(f"Assigned to: {ticket.get('assignee')}")
+    
+    # Add priority and impact if available
+    if ticket.get('priority') or ticket.get('impact'):
+        priority_impact = []
+        if ticket.get('priority'):
+            priority_impact.append(f"Priority: {ticket.get('priority')}")
+        if ticket.get('impact'):
+            priority_impact.append(f"Impact: {ticket.get('impact')}")
+        sections.append(" | ".join(priority_impact))
+    
+    # Add problem description
+    if parsed_description['sections']['problem']:
+        sections.append("\nProblem:")
+        sections.append(parsed_description['sections']['problem'])
+    elif parsed_description['text']:
+        sections.append("\nDescription:")
+        sections.append(parsed_description['text'][:500] + ('...' if len(parsed_description['text']) > 500 else ''))
+    
+    # Add action taken if available
+    if parsed_description['sections']['action']:
+        sections.append("\nAction Taken:")
+        sections.append(parsed_description['sections']['action'])
+    
+    # Add resolution if available
+    if parsed_description['sections']['resolution']:
+        sections.append("\nResolution:")
+        sections.append(parsed_description['sections']['resolution'])
+    
+    # Add error codes if found
+    if parsed_description['error_codes']:
+        sections.append("\nError Codes:")
+        sections.append(", ".join(parsed_description['error_codes']))
+    
+    return "\n".join(sections)
